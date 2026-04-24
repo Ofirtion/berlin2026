@@ -1,0 +1,3075 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl"><head>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+      (function() {
+        const originalConsole = window.console;
+        window.console = {
+          log: (...args) => {
+            originalConsole.log(...args);
+            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
+          },
+          error: (...args) => {
+            originalConsole.error(...args);
+            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
+          },
+          warn: (...args) => {
+            originalConsole.warn(...args);
+            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
+          }
+        };
+
+        let requestId = 0;
+        let callbacksMap = new Map();
+        let streamControllers = new Map();
+        
+        window.claude = {
+          complete: (prompt) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
+            });
+          }
+        };
+
+        window.storage = {
+          get: (key, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageGet', id, key, shared }, '*');
+            });
+          },
+          set: (key, value, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageSet', id, key, value, shared }, '*');
+            });
+          },
+          delete: (key, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageDelete', id, key, shared }, '*');
+            });
+          },
+          list: (prefix, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageList', id, prefix, shared }, '*');
+            });
+          }
+        };
+
+        let pendingBlobs = new Map();
+        URL.createObjectURL = (blob) => {
+          // Store the blob and create an ID and URL for it
+          const blobId = `blob-${Date.now()}-${Math.random()}`;
+          pendingBlobs.set(blobId, blob);
+          return `blob-request://${blobId}`;
+        };
+
+        URL.revokeObjectURL = (url) => {
+          // Remove the blob from our store
+          const blobId = url.replace("blob-request://", "");
+          pendingBlobs.delete(blobId);
+        };
+
+        const getBlobFromURL = (url) => {
+          const blobId = url.replace("blob-request://", "");
+          return pendingBlobs.get(blobId);
+        };
+
+        // Override global fetch with streaming support
+        window.fetch = (url, init = {}) => {
+          return new Promise((resolve, reject) => {
+            const id = requestId++;
+            const channelId = `fetch-${id}-${Date.now()}`;
+            
+            callbacksMap.set(id, { 
+              resolve: (response) => {
+                // Create a ReadableStream for the response body
+                const stream = new ReadableStream({
+                  start(controller) {
+                    streamControllers.set(channelId, controller);
+                  },
+                  cancel() {
+                    streamControllers.delete(channelId);
+                  }
+                });
+                
+                // Create and return the Response with the stream
+                resolve(new Response(stream, {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers
+                }));
+              },
+              reject,
+              channelId
+            });
+            
+            window.parent.postMessage({
+              type: 'proxyFetch',
+              id,
+              url,
+              init,
+              channelId
+            }, '*');
+          });
+        };
+
+        window.addEventListener('message', async (event) => {
+          if (event.data.type === 'takeScreenshot') {
+            const rootElement = document.getElementById('artifacts-component-root-html');
+            if (!rootElement) {
+              window.parent.postMessage({
+                type: 'screenshotError',
+                error: new Error('Root element not found'),
+              }, '*');
+            }
+            const screenshot = await htmlToImage.toPng(rootElement, {
+              imagePlaceholder:
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
+            });
+            window.parent.postMessage({
+              type: 'screenshotData',
+              data: screenshot,
+            }, '*');
+          } else if (event.data.type === 'claudeComplete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.completion);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'proxyFetchResponse') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+              callbacksMap.delete(event.data.id);
+            } else {
+              // Initial response with headers, status, etc.
+              callback.resolve({
+                status: event.data.status,
+                statusText: event.data.statusText,
+                headers: event.data.headers
+              });
+              // Don't delete the callback yet if streaming
+              if (!event.data.body) {
+                callbacksMap.delete(event.data.id);
+              }
+            }
+          } else if (event.data.type === 'proxyFetchStream') {
+            // Handle streaming data chunks
+            const controller = streamControllers.get(event.data.channelId);
+            if (controller) {
+              if (event.data.error) {
+                controller.error(new Error(event.data.error));
+                streamControllers.delete(event.data.channelId);
+              } else if (event.data.done) {
+                controller.close();
+                streamControllers.delete(event.data.channelId);
+                // Clean up the callback
+                const callback = Array.from(callbacksMap.entries()).find(
+                  ([_, value]) => value.channelId === event.data.channelId
+                );
+                if (callback) {
+                  callbacksMap.delete(callback[0]);
+                }
+              } else if (event.data.chunk) {
+                controller.enqueue(new Uint8Array(event.data.chunk));
+              }
+            }
+          } else if (event.data.type === 'storageGet') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageSet') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageDelete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageList') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          }
+        });
+
+        window.addEventListener('click', (event) => {
+          const isEl = event.target instanceof HTMLElement;
+          if (!isEl) return;
+    
+          // find ancestor links
+          const linkEl = event.target.closest("a");
+          if (!linkEl || !linkEl.href) return;
+    
+          event.preventDefault();
+          event.stopImmediatePropagation();
+    
+          if (linkEl.href.startsWith("blob-request:")) {
+            const blob = getBlobFromURL(linkEl.href);
+            if (!blob) return;
+            void blob.arrayBuffer().then((data) => {
+              window.parent.postMessage({
+                type: "downloadFile",
+                filename: linkEl.download,
+                data,
+                mimeType: blob.type || "application/octet-stream",
+              });
+            });
+          } else if (linkEl.href.startsWith("data:")) {
+            const [header, base64Data] = linkEl.href.split(",");
+            const mimeMatch = header.match(/data:([^;]+)/);
+            const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+            const binaryString = atob(base64Data);
+            const data = Uint8Array.from(binaryString, (c) =>
+              c.charCodeAt(0),
+            ).buffer;
+            window.parent.postMessage({
+              type: "downloadFile",
+              filename: linkEl.download,
+              data,
+              mimeType,
+            });
+          } else {
+            let linkUrl;
+            try {
+              linkUrl = new URL(linkEl.href);
+            } catch (error) {
+              return;
+            }
+    
+            if (linkUrl.hostname === window.location.hostname) return;
+      
+            window.parent.postMessage({
+              type: 'openExternal',
+              href: linkEl.href,
+            }, '*');
+          }
+      });
+
+        const originalOpen = window.open;
+        window.open = function (url) {
+          window.parent.postMessage({
+            type: "openExternal",
+            href: url,
+          }, "*");
+        };
+
+        window.addEventListener('error', (event) => {
+          window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*');
+        });
+      })();
+    </script>
+  
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#1a5fa5">
+<title>משלחת ברלין 2026</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>
+:root{
+  --blue:#1a5fa5; --blue-l:#e6f1fb; --blue-d:#0c447c; --blue-m:#2a7acc;
+  --red:#c0392b; --red-l:#fdecea; --red-m:#e05050;
+  --green:#1a7a34; --green-l:#e6f9e9;
+  --amber:#b07800; --amber-l:#fff8e1;
+  --purple:#6a3fb0; --purple-l:#f0e9fa;
+  --g50:#f7f7f7; --g100:#eeeeee; --g200:#dddddd;
+  --g400:#aaa; --g600:#666; --g900:#1a1a1a;
+  --r:12px; --rs:8px;
+  --shadow:0 2px 8px rgba(0,0,0,0.06);
+  --shadow-lg:0 8px 24px rgba(0,0,0,0.12);
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{font-family:'Heebo',sans-serif;background:var(--g50);color:var(--g900);direction:rtl;text-align:right;line-height:1.5;overscroll-behavior:none}
+body{padding-bottom:80px;min-height:100vh}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+a{color:var(--blue);text-decoration:none}
+input,textarea,select{font-family:inherit;font-size:16px;width:100%;padding:10px 12px;border:1px solid var(--g200);border-radius:var(--rs);background:#fff;color:var(--g900);outline:none}
+input:focus,textarea:focus,select:focus{border-color:var(--blue)}
+textarea{resize:vertical;min-height:80px}
+
+/* HEADER */
+.hdr{position:sticky;top:0;z-index:50;background:var(--blue);color:#fff;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
+.hdr-title{display:flex;align-items:center;gap:8px;font-weight:600}
+.hdr-title .plane{font-size:18px}
+.hdr-title .nm{font-size:15px;line-height:1.1}
+.hdr-title .dt{font-size:11px;opacity:0.85;margin-top:2px}
+.hdr-actions{display:flex;gap:8px;align-items:center}
+.hdr-btn{width:38px;height:38px;border-radius:10px;background:rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;color:#fff}
+.hdr-btn svg{width:20px;height:20px;fill:#fff}
+.sos-hdr{background:var(--red);animation:redpulse 2.5s infinite;font-weight:700;font-size:13px;padding:0 12px;width:auto;min-width:54px}
+@keyframes redpulse{0%,100%{background:#c0392b}50%{background:#e05050}}
+
+/* PAGES */
+.page{display:none;padding:14px;min-height:calc(100vh - 140px)}
+.page.on{display:block;animation:fadein .2s}
+@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* HOME */
+.hero{background:linear-gradient(135deg,var(--blue) 0%,var(--blue-d) 100%);color:#fff;border-radius:16px;padding:22px 18px;margin-bottom:14px;position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;top:-40px;left:-40px;width:140px;height:140px;background:rgba(255,255,255,0.08);border-radius:50%}
+.hero::after{content:"";position:absolute;bottom:-30px;right:-30px;width:100px;height:100px;background:rgba(255,255,255,0.06);border-radius:50%}
+.hero-flag{font-size:32px;margin-bottom:6px;position:relative}
+.hero-title{font-size:22px;font-weight:700;line-height:1.2;position:relative}
+.hero-dates{font-size:13px;opacity:0.9;margin-top:4px;position:relative}
+.hero-greet{font-size:14px;margin-top:12px;background:rgba(255,255,255,0.15);padding:8px 12px;border-radius:20px;display:inline-block;position:relative}
+
+.today-strip{background:#fff;border:1px solid var(--g100);border-right:4px solid var(--blue);border-radius:var(--r);padding:14px;margin-bottom:14px;box-shadow:var(--shadow)}
+
+.weather-widget{background:linear-gradient(135deg,#4a90d9 0%,#2a7acc 100%);color:#fff;border-radius:var(--r);padding:14px;margin-bottom:14px;box-shadow:var(--shadow);overflow:hidden}
+.weather-widget .wh{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.weather-widget .wh-title{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;opacity:0.95}
+.weather-widget .wh-loc{font-size:11px;opacity:0.8}
+.weather-widget .w-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.weather-widget .w-day{background:rgba(255,255,255,0.15);border-radius:10px;padding:10px 6px;text-align:center;backdrop-filter:blur(4px)}
+.weather-widget .w-day .dn{font-size:11px;font-weight:600;opacity:0.9;margin-bottom:4px}
+.weather-widget .w-day .wi{font-size:28px;line-height:1;margin:2px 0}
+.weather-widget .w-day .wt{font-size:15px;font-weight:700;margin-top:2px}
+.weather-widget .w-day .wt .lo{font-size:12px;font-weight:500;opacity:0.8}
+.weather-widget .w-day .wd{font-size:10px;opacity:0.85;margin-top:3px;line-height:1.2;min-height:22px}
+.weather-widget .w-loading{text-align:center;font-size:13px;padding:12px;opacity:0.85}
+.weather-widget .w-err{text-align:center;font-size:12px;padding:8px;opacity:0.9}
+.today-strip h3{font-size:13px;color:var(--blue);font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.today-ev{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--g100);font-size:14px}
+.today-ev:last-of-type{border:none}
+.today-ev .t{font-weight:700;color:var(--blue);min-width:48px}
+.today-ev .tt{flex:1}
+.today-more{display:block;text-align:center;color:var(--blue);font-weight:600;padding:8px;margin-top:6px;font-size:14px}
+
+.nav-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+.nav-card{background:#fff;border-radius:var(--r);padding:18px 14px;text-align:center;border:1px solid var(--g100);box-shadow:var(--shadow);transition:transform .15s;display:block;color:inherit}
+.nav-card:active{transform:scale(0.97)}
+.nav-card .ic{font-size:32px;margin-bottom:6px}
+.nav-card .lb{font-size:14px;font-weight:600;color:var(--g900)}
+.nav-card.b{border-top:3px solid var(--blue)}
+.nav-card.r{border-top:3px solid var(--red)}
+.nav-card.g{border-top:3px solid var(--green)}
+.nav-card.p{border-top:3px solid var(--purple)}
+
+.sos-strip{background:linear-gradient(135deg,var(--red) 0%,#8e2a1f 100%);color:#fff;border-radius:var(--r);padding:16px;display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;box-shadow:0 4px 12px rgba(192,57,43,0.3)}
+.sos-strip .tx{display:flex;align-items:center;gap:10px;font-weight:600}
+.sos-strip .ic{font-size:24px;animation:pulsesm 2s infinite}
+@keyframes pulsesm{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
+.sos-strip .arr{font-size:20px}
+
+.chips-row{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+.chips-row::-webkit-scrollbar{display:none}
+.chip{background:#fff;border:1px solid var(--g200);border-radius:20px;padding:8px 14px;font-size:13px;white-space:nowrap;color:var(--g600);display:flex;align-items:center;gap:6px}
+
+/* SCHEDULE */
+.tabs{display:flex;gap:6px;overflow-x:auto;margin-bottom:14px;padding-bottom:4px;scrollbar-width:none;position:sticky;top:60px;background:var(--g50);padding-top:6px;z-index:10}
+.tabs::-webkit-scrollbar{display:none}
+.tab{background:#fff;border:1px solid var(--g200);border-radius:10px;padding:10px 14px;font-size:13px;font-weight:600;white-space:nowrap;color:var(--g600);transition:all .15s}
+.tab.on{background:var(--blue);color:#fff;border-color:var(--blue);box-shadow:0 2px 6px rgba(26,95,165,0.3)}
+
+.day-block{display:none}
+.day-block.on{display:block;animation:fadein .2s}
+
+.hotel-card{background:linear-gradient(135deg,var(--blue-l) 0%,#fff 100%);border:1px solid var(--blue);border-right:4px solid var(--blue);border-radius:var(--r);padding:12px 14px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center}
+.hotel-card .n{font-weight:700;color:var(--blue-d);font-size:14px}
+.hotel-card .d{font-size:12px;color:var(--g600);margin-top:2px}
+.hotel-card .mp{background:var(--blue);color:#fff;padding:6px 10px;border-radius:8px;font-size:13px;font-weight:600}
+
+.dress-badge{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:20px;font-size:13px;font-weight:600;margin-bottom:12px}
+.dress-badge.casual{background:var(--green-l);color:var(--green);border:1px solid var(--green)}
+.dress-badge.formal{background:var(--blue-l);color:var(--blue-d);border:1px solid var(--blue)}
+
+.ev-card{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:12px 14px;margin-bottom:10px;box-shadow:var(--shadow);position:relative}
+.ev-card .top-row{display:flex;align-items:flex-start;gap:10px;margin-bottom:6px}
+.ev-card .time{background:var(--blue);color:#fff;padding:4px 10px;border-radius:8px;font-size:13px;font-weight:700;min-width:56px;text-align:center;flex-shrink:0}
+.ev-card .title{flex:1;font-weight:600;font-size:15px;line-height:1.3;color:var(--g900)}
+.ev-card .edit-btn{width:30px;height:30px;border-radius:8px;background:var(--g50);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+.ev-card .detail{font-size:13px;color:var(--g600);margin:4px 0 6px 0;line-height:1.4}
+.ev-card .map-link{display:inline-flex;align-items:center;gap:4px;background:var(--blue-l);color:var(--blue-d);padding:5px 10px;border-radius:6px;font-size:12px;font-weight:600;margin-left:6px}
+.ev-files{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.file-chip{display:inline-flex;align-items:center;gap:4px;background:var(--blue-l);color:var(--blue-d);padding:5px 10px;border-radius:6px;font-size:12px;font-weight:500;border:1px solid var(--blue)}
+.file-chip .sz{color:var(--g600);font-size:11px;font-weight:400}
+
+/* SECURITY */
+.contact-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+.contact-btn{background:var(--red);color:#fff;padding:14px;border-radius:var(--r);text-align:center;font-weight:700;box-shadow:var(--shadow);display:block}
+.contact-btn .n{font-size:13px;font-weight:500;opacity:0.95}
+.contact-btn .num{font-size:22px;font-weight:800;margin-top:2px}
+.contact-btn.blue{background:var(--blue)}
+
+.alert-card{border-radius:var(--r);padding:14px;margin-bottom:10px;box-shadow:var(--shadow)}
+.alert-card.critical{background:var(--red-l);border:1px solid var(--red);border-right:4px solid var(--red)}
+.alert-card.warn{background:var(--amber-l);border:1px solid var(--amber);border-right:4px solid var(--amber)}
+.alert-card h3{font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.alert-card.critical h3{color:var(--red)}
+.alert-card.warn h3{color:var(--amber)}
+.alert-card ul{list-style:none;font-size:13px;color:var(--g900);line-height:1.7}
+.alert-card ul li{padding-right:4px}
+
+/* REFLECT */
+.ref-questions{background:var(--blue);color:#fff;border-radius:var(--r);padding:14px;margin-bottom:12px;box-shadow:var(--shadow)}
+.ref-questions h3{font-size:14px;margin-bottom:8px;font-weight:700}
+.ref-questions ol{padding-right:18px;font-size:13px;line-height:1.7}
+
+.ref-form{background:#fff;border-radius:var(--r);padding:14px;margin-bottom:14px;box-shadow:var(--shadow);border:1px solid var(--g100)}
+.ref-form label{display:block;font-size:13px;font-weight:600;margin-bottom:6px;color:var(--g900)}
+.ref-form .field{margin-bottom:12px}
+
+.img-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
+.img-grid .cell{position:relative;aspect-ratio:1;border-radius:8px;overflow:hidden;background:var(--g100)}
+.img-grid .cell img{width:100%;height:100%;object-fit:cover}
+.img-grid .cell .rm{position:absolute;top:4px;left:4px;width:22px;height:22px;border-radius:50%;background:rgba(0,0,0,0.6);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px}
+
+.photo-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px}
+.photo-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:14px 8px;border-radius:var(--rs);font-size:13px;font-weight:600;transition:transform .1s;border:2px solid}
+.photo-btn:active{transform:scale(0.97)}
+.photo-btn .ic{font-size:24px}
+.photo-btn.camera{background:var(--blue);color:#fff;border-color:var(--blue)}
+.photo-btn.gallery{background:#fff;color:var(--blue);border-color:var(--blue)}
+
+.btn{padding:12px 18px;border-radius:var(--rs);font-weight:600;font-size:14px;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:transform .1s}
+.btn:active{transform:scale(0.97)}
+.btn-primary{background:var(--blue);color:#fff}
+.btn-primary:hover{background:var(--blue-d)}
+.btn-danger{background:var(--red);color:#fff}
+.btn-ghost{background:var(--g100);color:var(--g900)}
+.btn-success{background:var(--green);color:#fff}
+.btn-full{width:100%}
+
+.ref-saved-card{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:12px 14px;margin-bottom:10px;box-shadow:var(--shadow)}
+.ref-saved-card .meta{display:flex;justify-content:space-between;font-size:12px;color:var(--g600);margin-bottom:6px;font-weight:500}
+.ref-saved-card .meta .day{color:var(--blue);font-weight:700}
+.ref-saved-card .txt{font-size:14px;line-height:1.5;white-space:pre-wrap;margin-bottom:8px}
+.ref-saved-card .thumbs{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+.ref-saved-card .thumbs img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px}
+.ref-saved-card .rm{background:none;color:var(--red);font-size:12px;font-weight:600;padding:4px 8px;margin-top:6px}
+
+.section-title{font-size:15px;font-weight:700;margin:16px 0 10px 0;color:var(--g900);display:flex;align-items:center;gap:6px}
+
+/* SOS PAGE */
+.sos-wrap{text-align:center;padding:12px 0}
+.sos-btn{width:140px;height:140px;border-radius:50%;background:var(--red);color:#fff;font-size:36px;font-weight:800;margin:20px auto;display:flex;align-items:center;justify-content:center;flex-direction:column;box-shadow:0 0 0 8px rgba(192,57,43,0.2),0 0 0 16px rgba(192,57,43,0.1),0 8px 24px rgba(192,57,43,0.4);animation:sosring 2.5s infinite;user-select:none;touch-action:none}
+.sos-btn .lb{font-size:14px;margin-top:4px;font-weight:600;opacity:0.95}
+@keyframes sosring{0%,100%{box-shadow:0 0 0 8px rgba(192,57,43,0.2),0 0 0 16px rgba(192,57,43,0.1),0 8px 24px rgba(192,57,43,0.4)}50%{box-shadow:0 0 0 14px rgba(192,57,43,0.15),0 0 0 28px rgba(192,57,43,0.05),0 8px 24px rgba(192,57,43,0.5)}}
+.sos-btn.pressed{transform:scale(0.95);transition:transform .1s}
+.sos-hint{font-size:13px;color:var(--g600);margin-bottom:14px}
+
+.loc-card{background:#fff;border-radius:var(--r);padding:12px 14px;border:1px solid var(--g100);box-shadow:var(--shadow);margin-bottom:12px;text-align:right}
+.loc-card .row1{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.loc-card .status{font-size:13px;font-weight:600}
+.loc-card .coord{font-size:12px;color:var(--g600);font-family:monospace}
+.loc-card .refresh{background:var(--blue-l);color:var(--blue);padding:5px 10px;border-radius:6px;font-size:12px;font-weight:600}
+
+.cd-overlay{position:fixed;inset:0;background:rgba(192,57,43,0.95);color:#fff;z-index:100;display:none;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px}
+.cd-overlay.on{display:flex}
+.cd-num{font-size:120px;font-weight:800;line-height:1;margin:20px 0}
+.cd-title{font-size:22px;font-weight:700}
+.cd-sub{font-size:14px;opacity:0.9;margin-top:8px}
+.cd-cancel{background:#fff;color:var(--red);padding:14px 40px;border-radius:var(--r);font-weight:800;font-size:16px;margin-top:30px}
+
+.settings-card{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:14px;box-shadow:var(--shadow);margin-bottom:12px}
+.settings-card h3{font-size:14px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.settings-card label{display:block;font-size:12px;font-weight:600;color:var(--g600);margin:8px 0 4px 0}
+
+/* ADMIN */
+.admin-login{max-width:360px;margin:40px auto;background:#fff;border-radius:var(--r);padding:24px;box-shadow:var(--shadow);text-align:center;border:1px solid var(--g100)}
+.admin-login .ic{font-size:42px;margin-bottom:10px}
+.admin-login h2{font-size:20px;margin-bottom:6px}
+.admin-login .sub{font-size:13px;color:var(--g600);margin-bottom:16px}
+.admin-login .err{color:var(--red);font-size:13px;margin-top:8px;min-height:18px;font-weight:600}
+
+.adm-tabs{display:flex;gap:6px;margin-bottom:14px;background:#fff;border-radius:var(--r);padding:4px;border:1px solid var(--g100)}
+.adm-tab{flex:1;padding:10px 8px;border-radius:var(--rs);font-size:13px;font-weight:600;color:var(--g600);text-align:center}
+.adm-tab.on{background:var(--blue);color:#fff}
+
+.adm-panel{display:none}
+.adm-panel.on{display:block}
+
+.day-selector{display:flex;gap:6px;overflow-x:auto;margin-bottom:12px;padding-bottom:4px;scrollbar-width:none}
+.day-selector::-webkit-scrollbar{display:none}
+.day-btn{background:#fff;border:1px solid var(--g200);border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;color:var(--g600);white-space:nowrap}
+.day-btn.on{background:var(--blue);color:#fff;border-color:var(--blue)}
+
+.adm-ev{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:12px;margin-bottom:8px;display:flex;align-items:center;gap:10px;box-shadow:var(--shadow)}
+.adm-ev .tb{background:var(--blue);color:#fff;padding:4px 8px;border-radius:6px;font-size:12px;font-weight:700;min-width:50px;text-align:center;flex-shrink:0}
+.adm-ev .info{flex:1;min-width:0}
+.adm-ev .tt{font-weight:600;font-size:14px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.adm-ev .mt{font-size:11px;color:var(--g600);margin-top:2px}
+.adm-ev .acts{display:flex;gap:4px;flex-shrink:0}
+.adm-ev .acts button{width:32px;height:32px;border-radius:8px;background:var(--g50);display:flex;align-items:center;justify-content:center;font-size:14px}
+
+/* SHEET / MODAL */
+.sheet-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:200;display:none;opacity:0;transition:opacity .2s}
+.sheet-overlay.on{display:block;opacity:1}
+.sheet{position:fixed;bottom:0;left:0;right:0;background:#fff;border-radius:20px 20px 0 0;z-index:201;max-height:90vh;overflow-y:auto;transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);padding-bottom:env(safe-area-inset-bottom)}
+.sheet.on{transform:translateY(0)}
+.sheet-handle{width:40px;height:4px;background:var(--g200);border-radius:2px;margin:10px auto}
+.sheet-header{padding:6px 18px 12px;border-bottom:1px solid var(--g100);display:flex;justify-content:space-between;align-items:center}
+.sheet-header h3{font-size:17px;font-weight:700}
+.sheet-body{padding:14px 18px}
+.sheet-body .field{margin-bottom:12px}
+.sheet-body label{display:block;font-size:13px;font-weight:600;color:var(--g900);margin-bottom:6px}
+.sheet-actions{display:flex;gap:8px;padding:12px 18px;border-top:1px solid var(--g100);background:#fff;position:sticky;bottom:0}
+
+.map-preview{display:inline-flex;align-items:center;gap:4px;background:var(--blue);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;font-weight:600;margin-top:6px;text-decoration:none}
+
+/* BOTTOM NAV */
+.bnav{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--g100);display:grid;grid-template-columns:repeat(6,1fr);box-shadow:0 -2px 10px rgba(0,0,0,0.06);z-index:40;padding-bottom:env(safe-area-inset-bottom)}
+.bnav-btn{padding:8px 2px;text-align:center;color:var(--g600);font-size:10px;font-weight:600;transition:color .15s}
+.bnav-btn .ic{font-size:20px;margin-bottom:2px;display:block}
+.bnav-btn.on{color:var(--blue)}
+.bnav-btn.sos-nav.on{color:var(--red)}
+.bnav-btn:active{background:var(--g50)}
+
+/* BROADCAST POPUP */
+.bc-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:300;display:none;align-items:center;justify-content:center;padding:20px}
+.bc-overlay.on{display:flex;animation:fadein .2s}
+.bc-modal{background:#fff;border-radius:16px;max-width:380px;width:100%;overflow:hidden;box-shadow:var(--shadow-lg);animation:popin .3s cubic-bezier(.2,.8,.2,1.2)}
+@keyframes popin{from{transform:scale(0.8);opacity:0}to{transform:scale(1);opacity:1}}
+.bc-head{padding:20px;text-align:center;color:#fff}
+.bc-head.urgent{background:var(--red)}
+.bc-head.info{background:var(--blue)}
+.bc-head.update{background:var(--green)}
+.bc-head .ic{font-size:42px;margin-bottom:6px;display:block}
+.bc-head h3{font-size:18px;font-weight:700}
+.bc-body{padding:18px;font-size:14px;line-height:1.5;white-space:pre-wrap;color:var(--g900)}
+.bc-actions{padding:0 18px 18px}
+
+/* SHARE SHEET */
+.share-opt{display:flex;align-items:center;gap:12px;padding:14px;background:#fff;border:1px solid var(--g100);border-radius:var(--r);margin-bottom:8px;font-size:15px;font-weight:500}
+.share-opt .ic{font-size:24px;width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;background:var(--g50)}
+.share-opt.wa .ic{background:#25d36620;color:#25d366}
+.share-opt.tg .ic{background:var(--blue-l);color:var(--blue)}
+.share-opt.mail .ic{background:var(--amber-l);color:var(--amber)}
+.share-opt.copy .ic{background:var(--g100);color:var(--g900)}
+.share-opt.sync .ic{background:var(--green-l);color:var(--green)}
+
+/* MSG CARD */
+.msg-type-pick{display:flex;gap:6px;margin-bottom:12px}
+.msg-type-pick button{flex:1;padding:10px;border:2px solid var(--g200);border-radius:var(--rs);background:#fff;font-size:13px;font-weight:600}
+.msg-type-pick button.on.urgent{background:var(--red);color:#fff;border-color:var(--red)}
+.msg-type-pick button.on.info{background:var(--blue);color:#fff;border-color:var(--blue)}
+.msg-type-pick button.on.update{background:var(--green);color:#fff;border-color:var(--green)}
+
+.msg-hist{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:12px;margin-bottom:8px;box-shadow:var(--shadow)}
+.msg-hist .h{display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px}
+.msg-hist .tag{padding:2px 8px;border-radius:10px;font-weight:600;font-size:11px}
+.msg-hist .tag.urgent{background:var(--red-l);color:var(--red)}
+.msg-hist .tag.info{background:var(--blue-l);color:var(--blue)}
+.msg-hist .tag.update{background:var(--green-l);color:var(--green)}
+.msg-hist .tt{font-weight:600;font-size:14px;margin-bottom:2px}
+.msg-hist .bd{font-size:13px;color:var(--g600);line-height:1.4}
+
+/* SYNC STATUS */
+.sync-pill{display:inline-flex;align-items:center;gap:6px;background:var(--green-l);color:var(--green);padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;margin-bottom:10px}
+.sync-pill.off{background:var(--g100);color:var(--g600)}
+.sync-pill .dot{width:8px;height:8px;border-radius:50%;background:var(--green)}
+.sync-pill.off .dot{background:var(--g400)}
+
+/* REPORT */
+.report-wrap{background:#fff;padding:20px;border-radius:var(--r);box-shadow:var(--shadow);margin-bottom:14px}
+.report-hdr{text-align:center;padding-bottom:14px;border-bottom:2px solid var(--blue);margin-bottom:14px}
+.report-hdr .logo{font-size:32px}
+.report-hdr h2{font-size:20px;color:var(--blue-d);margin-top:4px}
+.report-hdr .sub{font-size:13px;color:var(--g600);margin-top:4px}
+.report-day{margin-bottom:18px}
+.report-day h3{background:var(--blue-l);color:var(--blue-d);padding:8px 12px;border-radius:8px;font-size:15px;margin-bottom:8px;border-right:4px solid var(--blue)}
+.report-ref{background:var(--g50);padding:12px;border-radius:8px;margin-bottom:8px}
+.report-ref .tm{font-size:12px;color:var(--g600);margin-bottom:4px}
+.report-ref .tx{font-size:13px;line-height:1.5;white-space:pre-wrap}
+.report-ref .imgs{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:8px}
+.report-ref .imgs img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px}
+
+@media print{
+  body>*:not(#report-page){display:none!important}
+  #report-page,#report-page *{display:revert}
+  .bnav,.hdr,.no-print,.bc-overlay,.sheet-overlay,.sheet{display:none!important}
+  #report-page{padding:0;background:#fff}
+  .report-wrap{box-shadow:none;border:none}
+  @page{margin:1cm}
+}
+</style>
+</head>
+<body id="artifacts-component-root-html" style="overflow: hidden;">
+
+<!-- HEADER -->
+<header class="hdr">
+  <div class="hdr-title">
+    <span class="plane">✈️</span>
+    <div>
+      <div class="nm">משלחת ברלין 2026</div>
+      <div class="dt">26–30.4</div>
+    </div>
+  </div>
+  <div class="hdr-actions">
+    <button class="hdr-btn" onclick="openShareSheet()" title="שיתוף">
+      <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"></path></svg>
+    </button>
+    <button class="hdr-btn sos-hdr" onclick="goPage('sos')">SOS</button>
+  </div>
+</header>
+
+<!-- HOME PAGE -->
+<section id="page-home" class="page on">
+  <div class="hero">
+    <div class="hero-flag">🇩🇪</div>
+    <div class="hero-title">משלחת ברלין 2026</div>
+    <div class="hero-dates">26–30 באפריל 2026</div>
+    <div class="hero-greet" id="greet">🌤️ צהריים טובים</div>
+  </div>
+
+  <div id="weather-widget" class="weather-widget" style="display: block;">
+    <div class="wh">
+      <div class="wh-title">🌤️ תחזית מזג אוויר</div>
+      <div class="wh-loc" style="font-size:10px">📊 ממוצע עונתי לברלין · סוף אפריל</div>
+    </div>
+    <div class="w-grid">
+      
+        <div class="w-day">
+          <div class="dn">היום</div>
+          <div class="wi">⛅</div>
+          <div class="wt">15°<span class="lo">/6°</span></div>
+          <div class="wd">מעונן חלקית</div>
+        </div>
+      
+        <div class="w-day">
+          <div class="dn">מחר</div>
+          <div class="wi">🌤️</div>
+          <div class="wt">17°<span class="lo">/7°</span></div>
+          <div class="wd">בהיר בעיקר</div>
+        </div>
+      
+        <div class="w-day">
+          <div class="dn">א׳ 26/4</div>
+          <div class="wi">🌦️</div>
+          <div class="wt">14°<span class="lo">/5°</span></div>
+          <div class="wd">טפטוף אפשרי<br>☔ 40%</div>
+        </div>
+      
+    </div>
+  </div>
+
+  <div id="today-strip" class="today-strip" style="display:none"></div>
+
+  <div class="nav-grid">
+    <a class="nav-card b" onclick="goPage('schedule')">
+      <div class="ic">📅</div><div class="lb">לו"ז</div>
+    </a>
+    <a class="nav-card r" onclick="goPage('security')">
+      <div class="ic">🛡️</div><div class="lb">הנחיות ביטחון</div>
+    </a>
+    <a class="nav-card g" href="https://drive.google.com/drive/folders/1B25Z583TOClY91nGGRSxkV2bCzbDNn0M" target="_blank" rel="noopener">
+      <div class="ic">📁</div><div class="lb">קבצי משלחת</div>
+    </a>
+    <a class="nav-card p" onclick="goPage('reflect')">
+      <div class="ic">📝</div><div class="lb">רפלקציה</div>
+    </a>
+  </div>
+
+  <div class="sos-strip" onclick="goPage('sos')">
+    <div class="tx"><span class="ic">🚨</span><div><div>לחצן מצוקה</div><div style="font-size:12px;opacity:0.9;font-weight:400">במצב חירום — לחיצה כאן</div></div></div>
+    <div class="arr">←</div>
+  </div>
+
+  <div class="chips-row">
+    <div class="chip">🏨 RIU Plaza Berlin</div>
+    <div class="chip">✈️ אל על LY2371</div>
+    <div class="chip">🧥 קריר ביום, קר בלילה</div>
+  </div>
+</section>
+
+<!-- SCHEDULE PAGE -->
+<section id="page-schedule" class="page">
+  <div class="tabs" id="day-tabs"><button class="tab on" onclick="selectDay('sun')">ראשון 26/4</button><button class="tab" onclick="selectDay('mon')">שני 27/4</button><button class="tab" onclick="selectDay('tue')">שלישי 28/4</button><button class="tab" onclick="selectDay('wed')">רביעי 29/4</button><button class="tab" onclick="selectDay('thu')">חמישי 30/4</button></div>
+  <div id="days-container"><div class="day-block on" id="day-sun"><div class="dress-badge casual">👕 לבוש נוח · 👕 חולצה ומכנסיים ספורטיביים</div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">03:30</div>
+      <div class="title">כינוס נתב"ג<a class="map-link" href="https://www.google.com/maps/search/Ben%20Gurion%20Airport%20Terminal%203%20Israel" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('sun','s1')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">טרמינל 3, מול דלפק מודיעין</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">06:20</div>
+      <div class="title">המראה לברלין<a class="map-link" href="https://www.google.com/maps/search/Ben%20Gurion%20Airport%20Terminal%203%20Israel" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('sun','s2')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">אל על LY2371</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">09:35</div>
+      <div class="title">נחיתה בברלין<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Brandenburg%20Airport%20BER%20Terminal%201" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('sun','s3')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">⚠️ לא להתקדם עצמאית — להמתין ביציאה מהשרוול</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">10:30</div>
+      <div class="title">יציאה מהטרמינל<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Brandenburg%20Airport%20BER" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('sun','s4')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">אוטובוס ממתין</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">17:00</div>
+      <div class="title">הגעה למלון RIU Plaza Berlin<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('sun','s5')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">כניסה לחדרים</div>
+    
+  </div></div><div class="day-block" id="day-mon"><div class="hotel-card"><div><div class="n">🏨 RIU Plaza Berlin</div><div class="d">לינה 26.4–30.4</div></div><a class="mp" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div><div class="dress-badge formal">👔 חליפה ללא עניבה · 👔 לבוש רשמי</div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">09:00</div>
+      <div class="title">יציאה מהמלון<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('mon','m1')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">רכבת קלה, כרטיס חופשי יחולק</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">10:00</div>
+      <div class="title">פגישה עם מפכ"לית ברלין + האקדמיה המשטרתית<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Police%20Headquarters%20Tempelhof" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('mon','m2')" title="ערוך">✏️</button>
+    </div>
+    
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">12:00</div>
+      <div class="title">זמן חופשי במרכז העיר<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Mitte%20city%20center" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('mon','m3')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">עד 14:00</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">14:00</div>
+      <div class="title">פגישה — Command 11<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Police%20Command%20Center%2011" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('mon','m4')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">מרכז פיקוד משטרתי</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">17:00</div>
+      <div class="title">חזרה למלון — ערב חופשי<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('mon','m5')" title="ערוך">✏️</button>
+    </div>
+    
+    
+  </div></div><div class="day-block" id="day-tue"><div class="hotel-card"><div><div class="n">🏨 RIU Plaza Berlin</div><div class="d">לינה 26.4–30.4</div></div><a class="mp" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div><div class="dress-badge formal">👔 חליפה ללא עניבה · 👔 לבוש רשמי</div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">09:00</div>
+      <div class="title">יציאה בתחב"צ לפרלמנט<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('tue','t1')" title="ערוך">✏️</button>
+    </div>
+    
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">10:00</div>
+      <div class="title">פגישה עם חבר פרלמנט<a class="map-link" href="https://www.google.com/maps/search/Bundestag%20Reichstag%20Building%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('tue','t2')" title="ערוך">✏️</button>
+    </div>
+    
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">12:00</div>
+      <div class="title">סיום בפרלמנט — נסיעה לאוניברסיטה<a class="map-link" href="https://www.google.com/maps/search/Bundestag%20Reichstag%20Building%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('tue','t3')" title="ערוך">✏️</button>
+    </div>
+    
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">14:00</div>
+      <div class="title">פעילות באוניברסיטה<a class="map-link" href="https://www.google.com/maps/search/HWR%20Berlin%20Hochschule%20f%C3%BCr%20Wirtschaft%20und%20Recht" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('tue','t4')" title="ערוך">✏️</button>
+    </div>
+    
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">17:00</div>
+      <div class="title">חזרה למלון — זמן חופשי<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('tue','t5')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">עד 19:00</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">19:00</div>
+      <div class="title">ערב מפקד — מלון קינג דייויד<a class="map-link" href="https://www.google.com/maps/search/Hotel%20Palace%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('tue','t6')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">יציאה במוניות, סיום משוער 23:00</div>
+    
+  </div></div><div class="day-block" id="day-wed"><div class="hotel-card"><div><div class="n">🏨 RIU Plaza Berlin</div><div class="d">לינה 26.4–30.4</div></div><a class="mp" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div><div class="dress-badge formal">👔 חליפה ללא עניבה · 👔 לבוש רשמי</div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">09:00</div>
+      <div class="title">יציאה בתחב"צ — פעילות בפרלמנט<a class="map-link" href="https://www.google.com/maps/search/Bundestag%20Reichstag%20Building%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('wed','w1')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">סיור + פגישות</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">13:00</div>
+      <div class="title">נסיעה ל-Rola Solutions<a class="map-link" href="https://www.google.com/maps/search/Rola%20Solutions%20GmbH%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('wed','w2')" title="ערוך">✏️</button>
+    </div>
+    
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">14:00</div>
+      <div class="title">פגישה עם נציגי Rola Solutions<a class="map-link" href="https://www.google.com/maps/search/Rola%20Solutions%20GmbH%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('wed','w3')" title="ערוך">✏️</button>
+    </div>
+    
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">16:00</div>
+      <div class="title">סיום — זמן חופשי</div>
+      <button class="edit-btn" onclick="openEventEditor('wed','w4')" title="ערוך">✏️</button>
+    </div>
+    
+    
+  </div></div><div class="day-block" id="day-thu"><div class="dress-badge casual">👕 לבוש נוח · 👕 אך התחשבו באופי המקום</div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">08:00</div>
+      <div class="title">פינוי חדרים<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('thu','h1')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">טסים: מזוודות לאוטובוס. נשארים: שמירת חפצים במלון</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">09:00</div>
+      <div class="title">יציאה לוילה ואנזה<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('thu','h2')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">אוטובוס צמוד כל היום</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">10:00</div>
+      <div class="title">פעילות בוילה ואנזה<a class="map-link" href="https://www.google.com/maps/search/Wannsee%20Conference%20House%20Villa%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('thu','h3')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">סדנת "בירוקרטים" — תפקיד הפקידים ביישום הפתרון הסופי</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">15:00</div>
+      <div class="title">סיום</div>
+      <button class="edit-btn" onclick="openEventEditor('thu','h4')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">טסים: קניון סמוך לשדה. נשארים: חופשי</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">20:55</div>
+      <div class="title">טיסה לסופיה<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Brandenburg%20Airport%20BER" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('thu','h5')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">Ryanair</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">00:10</div>
+      <div class="title">נחיתה בסופיה (שישי)<a class="map-link" href="https://www.google.com/maps/search/Sofia%20Airport%20Bulgaria" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('thu','h6')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">שאטל למלון</div>
+    
+  </div><div class="ev-card">
+    <div class="top-row">
+      <div class="time">11:05</div>
+      <div class="title">המראה מסופיה (שישי)<a class="map-link" href="https://www.google.com/maps/search/Sofia%20Airport%20Bulgaria" target="_blank" rel="noopener">📍 מפה</a></div>
+      <button class="edit-btn" onclick="openEventEditor('thu','h7')" title="ערוך">✏️</button>
+    </div>
+    <div class="detail">אל על LY552</div>
+    
+  </div></div></div>
+</section>
+
+<!-- SECURITY PAGE -->
+<section id="page-security" class="page">
+  <div class="alert-card critical" style="background:#fff8e1;border-color:#e0a800;border-right-color:#e0a800;margin-bottom:14px">
+    <h3 style="color:#a06800">🟡 אזהרת מסע — רמה 2 (איום מזדמן)</h3>
+    <div style="font-size:13px;color:var(--g900);line-height:1.6">
+      לפי <strong>המטה לביטחון לאומי</strong>, קיימת אזהרת מסע רמה 2 – איום מזדמן (צהוב). מומלץ לנקוט באמצעי זהירות מוגברים ולגלות ערנות גבוהה למתרחש סביבכם, תוך הקפדה יתרה על מכלול המלצות המל"ל.
+    </div>
+    <a href="https://www.gov.il/he/pages/germany2" target="_blank" rel="noopener" style="display:inline-block;margin-top:10px;background:#e0a800;color:#fff;padding:8px 14px;border-radius:8px;font-size:12px;font-weight:700;text-decoration:none">
+      📄 קרא עדכון מלא ←
+    </a>
+  </div>
+
+  <h2 class="section-title">📞 מספרי חירום</h2>
+  <div class="alert-card critical" style="margin-bottom:10px">
+    <h3 style="color:var(--red)">🇩🇪 בגרמניה</h3>
+    <ul style="font-size:15px;line-height:2;list-style:none">
+      <li><strong style="font-size:18px;color:var(--red)">110</strong> — משטרת גרמניה</li>
+      <li><strong style="font-size:18px;color:var(--red)">112</strong> — אמבולנס / כיבוי אש</li>
+    </ul>
+  </div>
+
+  <div class="alert-card warn" style="margin-bottom:14px">
+    <h3 style="color:var(--amber)">🇮🇱 מישראל</h3>
+    <ul style="font-size:14px;line-height:1.8;list-style:none">
+      <li style="padding:6px 0;border-bottom:1px solid rgba(0,0,0,0.06)">
+        <div style="font-weight:700">מרכז המצב — משרד החוץ</div>
+        <div style="font-size:17px;color:var(--amber);font-weight:800;letter-spacing:1px;margin-top:2px">02-530-3155</div>
+      </li>
+      <li style="padding:6px 0">
+        <div style="font-weight:700">מוקד אזהרות מסע — המל"ל (טרור)</div>
+        <div style="font-size:17px;color:var(--amber);font-weight:800;letter-spacing:1px;margin-top:2px">02-666-7444</div>
+      </li>
+    </ul>
+    <div style="background:#fff;padding:8px 10px;border-radius:6px;margin-top:8px;font-size:12px;color:var(--g600);line-height:1.4">
+      💡 פתח את אפליקציית הטלפון וחייג ישירות
+    </div>
+  </div>
+
+  <div class="settings-card" id="itzik-card">
+    <h3>👮 איציק (אבטחה)</h3>
+    <label>מספר טלפון</label>
+    <input type="tel" id="itzik-num" placeholder="לדוגמה: +972-50-1234567">
+    <button class="btn btn-primary btn-full" style="margin-top:8px" onclick="saveItzik()">💾 שמור</button>
+    <div id="itzik-display" style="display:none;margin-top:10px;padding:10px;background:var(--blue-l);border-radius:8px;font-weight:700;color:var(--blue-d);text-align:center;font-size:16px"></div>
+  </div>
+
+  <h2 class="section-title">🚨 התראות חשובות</h2>
+
+  <div class="alert-card critical">
+    <h3>🕶️ הצנעת זהות בפומבי</h3>
+    <ul>
+      <li>❌ שיח בעברית במקומות פומביים</li>
+      <li>❌ ביגוד ותיקים עם כיתוב בעברית</li>
+      <li>❌ הזדהות כקצינים בתחב"צ</li>
+      <li>✅ דברו אנגלית/גרמנית במקומות ציבוריים</li>
+    </ul>
+  </div>
+
+  <div class="alert-card critical">
+    <h3>⚡ נוהל חירום</h3>
+    <ul>
+      <li>1. חייג 110 (משטרת ברלין)</li>
+      <li>2. עדכן את איציק מיד</li>
+      <li>3. הישאר במקום בטוח עד הגעת סיוע</li>
+    </ul>
+  </div>
+
+  <div class="alert-card critical">
+    <h3>🛃 כניסה לגרמניה</h3>
+    <ul>
+      <li>לא להתקדם עצמאית לביקורת גבולות</li>
+      <li>להמתין ליציאה מהשרוול להוראות</li>
+    </ul>
+  </div>
+
+  <div class="alert-card warn">
+    <h3>👔 קוד לבוש</h3>
+    <ul>
+      <li>ראשון 26/4 + חמישי 30/4 — נוח</li>
+      <li>שני–רביעי — חליפה ללא עניבה</li>
+    </ul>
+  </div>
+
+  <div class="alert-card warn">
+    <h3>🌤️ מזג אוויר</h3>
+    <ul>
+      <li>קריר ביום, קר בלילה (8°–15°)</li>
+      <li>מומלץ: מעיל + שכבות, מטריה נשלפת</li>
+    </ul>
+  </div>
+
+  <div class="alert-card warn">
+    <h3>💶 כספים</h3>
+    <ul>
+      <li>שמור קבלות לכל הוצאה</li>
+      <li>תחב"צ ומוניות מסופקים ע"י המשלחת</li>
+    </ul>
+  </div>
+
+  <div class="alert-card warn">
+    <h3>📋 כללי</h3>
+    <ul>
+      <li>צלם דרכון (קדמי + אחורי) — שמור בנפרד</li>
+      <li>עדכון יומי בערב — דיווח סטטוס</li>
+    </ul>
+  </div>
+</section>
+
+<!-- REFLECT PAGE -->
+<section id="page-reflect" class="page">
+  <div class="ref-questions">
+    <h3>📖 שאלות מנחות לרפלקציה</h3>
+    <ol>
+      <li>מה היה האירוע המשמעותי ביותר היום?</li>
+      <li>אילו תובנות חדשות הבנתי?</li>
+      <li>כיצד ניתן ליישם את הנלמד בעבודה שלי?</li>
+      <li>מה ארצה לזכור לטווח ארוך?</li>
+    </ol>
+  </div>
+
+  <div class="ref-form">
+    <div class="field">
+      <label for="ref-day">בחר יום</label>
+      <select id="ref-day"><option value="sun">ראשון 26/4</option><option value="mon">שני 27/4</option><option value="tue">שלישי 28/4</option><option value="wed">רביעי 29/4</option><option value="thu">חמישי 30/4</option></select>
+    </div>
+    <div class="field">
+      <label for="ref-text">הרפלקציה שלי</label>
+      <textarea id="ref-text" rows="6" placeholder="כתוב כאן את הרפלקציה שלך..."></textarea>
+    </div>
+    <div class="field">
+      <label>תמונות (אופציונלי)</label>
+      <div class="photo-actions">
+        <button type="button" class="photo-btn camera" onclick="document.getElementById('ref-camera').click()">
+          <span class="ic">📷</span><span>צלם תמונה</span>
+        </button>
+        <button type="button" class="photo-btn gallery" onclick="document.getElementById('ref-imgs').click()">
+          <span class="ic">🖼️</span><span>בחר מהגלריה</span>
+        </button>
+      </div>
+      <input type="file" id="ref-camera" accept="image/*" capture="environment" style="display:none">
+      <input type="file" id="ref-imgs" accept="image/*" multiple="" style="display:none">
+      <div id="ref-img-preview" class="img-grid"></div>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="saveReflection()">💾 שמור רפלקציה</button>
+  </div>
+
+  <div id="ref-list">
+    <h2 class="section-title">📔 הרפלקציות שלי</h2>
+    <div id="ref-cards"><div style="color:var(--g600);font-size:13px;text-align:center;padding:14px">עדיין לא שמרת רפלקציות</div></div>
+  </div>
+
+  <div id="ref-report-btn" style="display:none;margin-top:12px">
+    <button class="btn btn-success btn-full" onclick="showReport()">📄 הפק דו"ח רפלקציה</button>
+  </div>
+</section>
+
+<!-- SOS PAGE -->
+<section id="page-sos" class="page">
+  <div class="sos-wrap">
+    <h2 style="color:var(--red);margin-bottom:6px">🚨 לחצן מצוקה</h2>
+    <div class="sos-hint">לחיצה ממושכת 2 שניות לשליחת הודעת חירום</div>
+    <div id="sos-btn" class="sos-btn" aria-label="SOS">
+      <div>SOS</div>
+      <div class="lb">לחץ והחזק</div>
+    </div>
+  </div>
+
+  <div class="alert-card critical" style="margin-bottom:14px">
+    <h3>📞 מספרי חירום בברלין</h3>
+    <ul style="font-size:15px;line-height:2">
+      <li><strong>110</strong> — משטרת ברלין</li>
+      <li><strong>112</strong> — אמבולנס / כיבוי אש</li>
+    </ul>
+    <div style="background:#fff;padding:8px 10px;border-radius:6px;margin-top:8px;font-size:12px;color:var(--g600)">
+      💡 פתח את אפליקציית הטלפון וחייג את המספר ישירות
+    </div>
+  </div>
+
+  <div class="loc-card">
+    <div class="row1">
+      <div class="status" id="loc-status">🟠 מיקום חסום בסביבה הזו</div>
+      <button class="refresh" onclick="refreshLocation()">📍 בקש מיקום</button>
+    </div>
+    <div class="coord" id="loc-coord">—</div>
+    <div id="loc-hint" style="font-size: 11px; color: var(--g600); margin-top: 6px; display: block; line-height: 1.4;">ℹ️ בסביבת Claude המיקום חסום. הורד את האפליקציה דרך כפתור השיתוף לקבלת מיקום מלא.</div>
+  </div>
+
+  <button class="btn btn-success btn-full" style="margin-bottom:14px;padding:14px;font-size:15px" onclick="sendWhatsAppNow()">💬 שלח הודעת חירום ב-WhatsApp</button>
+
+  <div class="settings-card">
+    <h3>⚙️ הגדרות SOS</h3>
+    <label>השם שלי (יופיע בהודעה)</label>
+    <input type="text" id="sos-name" placeholder="שם מלא">
+    <label>מספר WhatsApp לשליחה (עם קידומת, ללא +)</label>
+    <input type="tel" id="sos-num" placeholder="972501234567">
+    <label>קישור לקבוצת WhatsApp (אופציונלי)</label>
+    <input type="url" id="sos-grp" placeholder="https://chat.whatsapp.com/...">
+    <button class="btn btn-primary btn-full" style="margin-top:10px" onclick="saveSOSSettings()">💾 שמור הגדרות</button>
+  </div>
+</section>
+
+<!-- ADMIN PAGE -->
+<section id="page-admin" class="page">
+  <div id="admin-login" class="admin-login">
+    <div class="ic">🔐</div>
+    <h2>כניסת אדמין</h2>
+    <div class="sub">נדרשת סיסמה לעריכת התוכן</div>
+    <input type="password" id="admin-pwd" placeholder="סיסמה" onkeydown="if(event.key==='Enter')adminLogin()">
+    <div class="err" id="admin-err"></div>
+    <button class="btn btn-primary btn-full" style="margin-top:10px" onclick="adminLogin()">כניסה</button>
+  </div>
+
+  <div id="admin-panel" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div class="sync-pill" id="sync-pill"><div class="dot"></div><span id="sync-txt">ענן פעיל</span></div>
+      <button class="btn btn-ghost" style="padding:6px 14px;font-size:13px" onclick="adminLogout()">יציאה</button>
+    </div>
+    <div class="adm-tabs">
+      <button class="adm-tab on" data-adm="schedule" onclick="switchAdm('schedule')">📅 לו"ז</button>
+      <button class="adm-tab" data-adm="msgs" onclick="switchAdm('msgs')">📢 הודעות</button>
+      <button class="adm-tab" data-adm="settings" onclick="switchAdm('settings')">⚙️ הגדרות</button>
+    </div>
+
+    <div id="adm-schedule" class="adm-panel on">
+      <div class="day-selector" id="adm-day-sel"></div>
+      <div id="adm-events"></div>
+      <button class="btn btn-primary btn-full" style="margin-top:10px" onclick="addNewEvent()">＋ הוסף אירוע ליום זה</button>
+    </div>
+
+    <div id="adm-msgs" class="adm-panel">
+      <div class="settings-card">
+        <h3>📢 שליחת הודעה</h3>
+        <label>סוג</label>
+        <div class="msg-type-pick" id="msg-type">
+          <button type="button" data-t="urgent" class="on urgent" onclick="pickMsgType('urgent')">🚨 דחוף</button>
+          <button type="button" data-t="info" onclick="pickMsgType('info')">ℹ️ מידע</button>
+          <button type="button" data-t="update" onclick="pickMsgType('update')">✅ עדכון</button>
+        </div>
+        <label>כותרת</label>
+        <input type="text" id="msg-title" placeholder="לדוגמה: שינוי במלון">
+        <label>תוכן</label>
+        <textarea id="msg-body" rows="4" placeholder="תוכן ההודעה..."></textarea>
+        <button class="btn btn-primary btn-full" style="margin-top:10px" onclick="sendBroadcast()">שלח לכולם</button>
+      </div>
+      <h2 class="section-title">📜 היסטוריית הודעות</h2>
+      <div id="msg-history"></div>
+    </div>
+
+    <div id="adm-settings" class="adm-panel">
+      <div class="settings-card">
+        <h3>🔑 סיסמת אדמין</h3>
+        <label>סיסמה חדשה</label>
+        <input type="password" id="new-pwd" placeholder="הזן סיסמה חדשה">
+        <button class="btn btn-primary btn-full" style="margin-top:10px" onclick="changePwd()">עדכן סיסמה</button>
+      </div>
+      <div class="settings-card">
+        <h3>☁️ סנכרון ענן</h3>
+        <p style="font-size:13px;color:var(--g600);line-height:1.5;margin-bottom:10px">הלו"ז וההודעות מסונכרנים אוטומטית עם כל חברי המשלחת שפתחו את הקישור.</p>
+        <button class="btn btn-ghost btn-full" style="margin-bottom:8px" onclick="forceCloudSync()">🔄 סנכרן עכשיו</button>
+        <button class="btn btn-ghost btn-full" onclick="exportBackup()">💾 גיבוי JSON</button>
+      </div>
+      <div class="settings-card">
+        <h3>🔔 ניקוי הודעות</h3>
+        <p style="font-size:13px;color:var(--g600);line-height:1.5;margin-bottom:10px">אם הודעות ישנות חוזרות שוב ושוב — לחץ כאן לסימון כל ההודעות כנקראו.</p>
+        <button class="btn btn-ghost btn-full" style="margin-bottom:8px" onclick="markAllSeen()">✅ סמן הכל כנקרא</button>
+        <button class="btn btn-danger btn-full" onclick="deleteAllMessages()">🗑️ מחק את כל ההודעות</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- BOTTOM NAV -->
+<nav class="bnav">
+  <button class="bnav-btn" data-page="home" onclick="goPage('home')"><span class="ic">🏠</span>בית</button>
+  <button class="bnav-btn" data-page="schedule" onclick="goPage('schedule')"><span class="ic">📅</span>לו"ז</button>
+  <button class="bnav-btn" data-page="security" onclick="goPage('security')"><span class="ic">🛡️</span>ביטחון</button>
+  <button class="bnav-btn" data-page="reflect" onclick="goPage('reflect')"><span class="ic">📝</span>רפלקציה</button>
+  <button class="bnav-btn sos-nav on" data-page="sos" onclick="goPage('sos')"><span class="ic">🚨</span>SOS</button>
+  <button class="bnav-btn" data-page="admin" onclick="goPage('admin')"><span class="ic">⚙️</span>אדמין</button>
+</nav>
+
+<!-- COUNTDOWN OVERLAY -->
+<div id="cd-overlay" class="cd-overlay">
+  <div class="cd-title">שולח התראת מצוקה</div>
+  <div class="cd-num" id="cd-num">5</div>
+  <div class="cd-sub">תוך <span id="cd-sec">5</span> שניות יוצגו פעולות חירום</div>
+  <button class="cd-cancel" onclick="cancelCountdown()">ביטול</button>
+</div>
+
+<!-- SHEET & OVERLAY -->
+<div id="sheet-overlay" class="sheet-overlay" onclick="closeSheet()"></div>
+<div id="sheet" class="sheet">
+  <div class="sheet-handle"></div>
+  <div class="sheet-header">
+    <h3 id="sheet-title">שיתוף וייצוא</h3>
+    <button onclick="closeSheet()" style="font-size:20px;color:var(--g600);padding:4px 8px">✕</button>
+  </div>
+  <div class="sheet-body" id="sheet-body">
+    
+    <div style="background:var(--amber-l);border:1px solid var(--amber);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.5;color:#7a5600">
+      <strong>⚠️ הקישור של האפליקציה הזו אישי</strong> — לשיתוף עם חברי המשלחת, השתמש ב<strong>"הורד את האפליקציה (HTML)"</strong> למטה ושלח את הקובץ.
+    </div>
+    <p style="color:var(--g600);font-size:13px;margin-bottom:14px">שתף עם חברי המשלחת או ייצא את התוכן לשימוש אישי.</p>
+
+    <div style="font-size:12px;font-weight:700;color:var(--g600);margin:8px 0 8px 2px">📤 שיתוף הקישור (אישי)</div>
+    <div class="share-opt wa" onclick="shareVia('whatsapp')">
+      <span class="ic">💬</span><div>WhatsApp</div>
+    </div>
+    <div class="share-opt tg" onclick="shareVia('native')">
+      <span class="ic">📲</span><div>שתף...</div>
+    </div>
+    <div class="share-opt mail" onclick="shareVia('email')">
+      <span class="ic">📧</span><div>אימייל</div>
+    </div>
+    <div class="share-opt copy" onclick="shareVia('copy')">
+      <span class="ic">📋</span><div>העתק קישור</div>
+    </div>
+
+    <div style="font-size:12px;font-weight:700;color:var(--g600);margin:18px 0 8px 2px">💾 ייצוא תוכן (מומלץ לשיתוף)</div>
+    <div class="share-opt" onclick="exportStandaloneHTML()" style="border:2px solid var(--blue);background:var(--blue-l)">
+      <span class="ic" style="background:var(--blue-l);color:var(--blue)">🌐</span>
+      <div><div>הורד את האפליקציה (HTML)</div><div style="font-size:12px;color:var(--g600);font-weight:400">קובץ שעובד במצב אופליין — שלח אותו כקובץ מצורף</div></div>
+    </div>
+    <div class="share-opt" onclick="exportScheduleText()">
+      <span class="ic" style="background:var(--amber-l);color:var(--amber)">📄</span>
+      <div><div>הורד לו"ז כטקסט</div><div style="font-size:12px;color:var(--g600);font-weight:400">.txt — לשיתוף ב-WhatsApp או אימייל</div></div>
+    </div>
+    <div class="share-opt" onclick="shareScheduleWhatsApp()">
+      <span class="ic" style="background:#25d36620;color:#25d366">📅</span>
+      <div><div>שלח לו"ז ב-WhatsApp</div><div style="font-size:12px;color:var(--g600);font-weight:400">גרסה קצרה מעוצבת</div></div>
+    </div>
+    <div class="share-opt" onclick="printSchedule()">
+      <span class="ic" style="background:var(--g100);color:var(--g900)">🖨️</span>
+      <div><div>הדפס / שמור PDF</div><div style="font-size:12px;color:var(--g600);font-weight:400">לו"ז מלא להדפסה</div></div>
+    </div>
+    <div class="share-opt" onclick="exportBackup();closeSheet();">
+      <span class="ic" style="background:var(--purple-l);color:var(--purple)">💾</span>
+      <div><div>גיבוי JSON</div><div style="font-size:12px;color:var(--g600);font-weight:400">לשחזור מלא של כל הנתונים</div></div>
+    </div>
+  </div>
+  <div class="sheet-actions" id="sheet-actions" style="display:none"></div>
+</div>
+
+<!-- BROADCAST POPUP -->
+<div id="bc-overlay" class="bc-overlay">
+  <div class="bc-modal">
+    <div class="bc-head" id="bc-head">
+      <span class="ic" id="bc-ic">ℹ️</span>
+      <h3 id="bc-title">—</h3>
+    </div>
+    <div class="bc-body" id="bc-body">—</div>
+    <div class="bc-actions">
+      <button class="btn btn-primary btn-full" onclick="dismissBroadcast()">הבנתי</button>
+      <button class="btn btn-ghost btn-full" style="margin-top:6px;font-size:13px" onclick="dismissAllBroadcasts()">סגור את כל ההודעות</button>
+    </div>
+  </div>
+</div>
+
+<!-- REPORT (PRINT) -->
+<section id="report-page" class="page"></section>
+
+<script>
+window.__BERLIN_PRELOAD__ = {"schedule":{"sun":{"label":"ראשון 26/4","dress":{"type":"casual","text":"לבוש נוח","detail":"👕 חולצה ומכנסיים ספורטיביים"},"hotel":null,"events":[{"id":"s1","time":"03:30","title":"כינוס נתב\"ג","detail":"טרמינל 3, מול דלפק מודיעין","loc":"Ben Gurion Airport Terminal 3 Israel","files":[]},{"id":"s2","time":"06:20","title":"המראה לברלין","detail":"אל על LY2371","loc":"Ben Gurion Airport Terminal 3 Israel","files":[]},{"id":"s3","time":"09:35","title":"נחיתה בברלין","detail":"⚠️ לא להתקדם עצמאית — להמתין ביציאה מהשרוול","loc":"Berlin Brandenburg Airport BER Terminal 1","files":[]},{"id":"s4","time":"10:30","title":"יציאה מהטרמינל","detail":"אוטובוס ממתין","loc":"Berlin Brandenburg Airport BER","files":[]},{"id":"s5","time":"17:00","title":"הגעה למלון RIU Plaza Berlin","detail":"כניסה לחדרים","loc":"RIU Plaza Berlin Hotel Germany","files":[]}]},"mon":{"label":"שני 27/4","dress":{"type":"formal","text":"חליפה ללא עניבה","detail":"👔 לבוש רשמי"},"hotel":{"name":"RIU Plaza Berlin","dates":"26.4–30.4","loc":"RIU Plaza Berlin Hotel Germany"},"events":[{"id":"m1","time":"09:00","title":"יציאה מהמלון","detail":"רכבת קלה, כרטיס חופשי יחולק","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"m2","time":"10:00","title":"פגישה עם מפכ\"לית ברלין + האקדמיה המשטרתית","detail":"","loc":"Berlin Police Headquarters Tempelhof","files":[]},{"id":"m3","time":"12:00","title":"זמן חופשי במרכז העיר","detail":"עד 14:00","loc":"Berlin Mitte city center","files":[]},{"id":"m4","time":"14:00","title":"פגישה — Command 11","detail":"מרכז פיקוד משטרתי","loc":"Berlin Police Command Center 11","files":[]},{"id":"m5","time":"17:00","title":"חזרה למלון — ערב חופשי","detail":"","loc":"RIU Plaza Berlin Hotel Germany","files":[]}]},"tue":{"label":"שלישי 28/4","dress":{"type":"formal","text":"חליפה ללא עניבה","detail":"👔 לבוש רשמי"},"hotel":{"name":"RIU Plaza Berlin","dates":"26.4–30.4","loc":"RIU Plaza Berlin Hotel Germany"},"events":[{"id":"t1","time":"09:00","title":"יציאה בתחב\"צ לפרלמנט","detail":"","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"t2","time":"10:00","title":"פגישה עם חבר פרלמנט","detail":"","loc":"Bundestag Reichstag Building Berlin","files":[]},{"id":"t3","time":"12:00","title":"סיום בפרלמנט — נסיעה לאוניברסיטה","detail":"","loc":"Bundestag Reichstag Building Berlin","files":[]},{"id":"t4","time":"14:00","title":"פעילות באוניברסיטה","detail":"","loc":"HWR Berlin Hochschule für Wirtschaft und Recht","files":[]},{"id":"t5","time":"17:00","title":"חזרה למלון — זמן חופשי","detail":"עד 19:00","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"t6","time":"19:00","title":"ערב מפקד — מלון קינג דייויד","detail":"יציאה במוניות, סיום משוער 23:00","loc":"Hotel Palace Berlin","files":[]}]},"wed":{"label":"רביעי 29/4","dress":{"type":"formal","text":"חליפה ללא עניבה","detail":"👔 לבוש רשמי"},"hotel":{"name":"RIU Plaza Berlin","dates":"26.4–30.4","loc":"RIU Plaza Berlin Hotel Germany"},"events":[{"id":"w1","time":"09:00","title":"יציאה בתחב\"צ — פעילות בפרלמנט","detail":"סיור + פגישות","loc":"Bundestag Reichstag Building Berlin","files":[]},{"id":"w2","time":"13:00","title":"נסיעה ל-Rola Solutions","detail":"","loc":"Rola Solutions GmbH Berlin","files":[]},{"id":"w3","time":"14:00","title":"פגישה עם נציגי Rola Solutions","detail":"","loc":"Rola Solutions GmbH Berlin","files":[]},{"id":"w4","time":"16:00","title":"סיום — זמן חופשי","detail":"","loc":"","files":[]}]},"thu":{"label":"חמישי 30/4","dress":{"type":"casual","text":"לבוש נוח","detail":"👕 אך התחשבו באופי המקום"},"hotel":null,"events":[{"id":"h1","time":"08:00","title":"פינוי חדרים","detail":"טסים: מזוודות לאוטובוס. נשארים: שמירת חפצים במלון","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"h2","time":"09:00","title":"יציאה לוילה ואנזה","detail":"אוטובוס צמוד כל היום","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"h3","time":"10:00","title":"פעילות בוילה ואנזה","detail":"סדנת \"בירוקרטים\" — תפקיד הפקידים ביישום הפתרון הסופי","loc":"Wannsee Conference House Villa Berlin","files":[]},{"id":"h4","time":"15:00","title":"סיום","detail":"טסים: קניון סמוך לשדה. נשארים: חופשי","loc":"","files":[]},{"id":"h5","time":"20:55","title":"טיסה לסופיה","detail":"Ryanair","loc":"Berlin Brandenburg Airport BER","files":[]},{"id":"h6","time":"00:10","title":"נחיתה בסופיה (שישי)","detail":"שאטל למלון","loc":"Sofia Airport Bulgaria","files":[]},{"id":"h7","time":"11:05","title":"המראה מסופיה (שישי)","detail":"אל על LY552","loc":"Sofia Airport Bulgaria","files":[]}]}},"messages":[{"title":"בדיקה","body":"נסיון","type":"urgent","time":"18:51:25","date":"23.4.2026"}],"offline":true,"exportedAt":"2026-04-24T12:11:37.778Z"};
+</script>
+<script>
+// ==================== DATA ====================
+const DRIVE_URL = 'https://drive.google.com/drive/folders/1B25Z583TOClY91nGGRSxkV2bCzbDNn0M';
+
+const defaultSchedule = {
+  sun: {
+    label: 'ראשון 26/4',
+    dress: {type:'casual',text:'לבוש נוח',detail:'👕 חולצה ומכנסיים ספורטיביים'},
+    hotel: null,
+    events: [
+      {id:'s1',time:'03:30',title:'כינוס נתב"ג',detail:'טרמינל 3, מול דלפק מודיעין',loc:'Ben Gurion Airport Terminal 3 Israel',files:[]},
+      {id:'s2',time:'06:20',title:'המראה לברלין',detail:'אל על LY2371',loc:'Ben Gurion Airport Terminal 3 Israel',files:[]},
+      {id:'s3',time:'09:35',title:'נחיתה בברלין',detail:'⚠️ לא להתקדם עצמאית — להמתין ביציאה מהשרוול',loc:'Berlin Brandenburg Airport BER Terminal 1',files:[]},
+      {id:'s4',time:'10:30',title:'יציאה מהטרמינל',detail:'אוטובוס ממתין',loc:'Berlin Brandenburg Airport BER',files:[]},
+      {id:'s5',time:'17:00',title:'הגעה למלון RIU Plaza Berlin',detail:'כניסה לחדרים',loc:'RIU Plaza Berlin Hotel Germany',files:[]}
+    ]
+  },
+  mon: {
+    label: 'שני 27/4',
+    dress: {type:'formal',text:'חליפה ללא עניבה',detail:'👔 לבוש רשמי'},
+    hotel: {name:'RIU Plaza Berlin',dates:'26.4–30.4',loc:'RIU Plaza Berlin Hotel Germany'},
+    events: [
+      {id:'m1',time:'09:00',title:'יציאה מהמלון',detail:'רכבת קלה, כרטיס חופשי יחולק',loc:'RIU Plaza Berlin Hotel Germany',files:[]},
+      {id:'m2',time:'10:00',title:'פגישה עם מפכ"לית ברלין + האקדמיה המשטרתית',detail:'',loc:'Berlin Police Headquarters Tempelhof',files:[]},
+      {id:'m3',time:'12:00',title:'זמן חופשי במרכז העיר',detail:'עד 14:00',loc:'Berlin Mitte city center',files:[]},
+      {id:'m4',time:'14:00',title:'פגישה — Command 11',detail:'מרכז פיקוד משטרתי',loc:'Berlin Police Command Center 11',files:[]},
+      {id:'m5',time:'17:00',title:'חזרה למלון — ערב חופשי',detail:'',loc:'RIU Plaza Berlin Hotel Germany',files:[]}
+    ]
+  },
+  tue: {
+    label: 'שלישי 28/4',
+    dress: {type:'formal',text:'חליפה ללא עניבה',detail:'👔 לבוש רשמי'},
+    hotel: {name:'RIU Plaza Berlin',dates:'26.4–30.4',loc:'RIU Plaza Berlin Hotel Germany'},
+    events: [
+      {id:'t1',time:'09:00',title:'יציאה בתחב"צ לפרלמנט',detail:'',loc:'RIU Plaza Berlin Hotel Germany',files:[]},
+      {id:'t2',time:'10:00',title:'פגישה עם חבר פרלמנט',detail:'',loc:'Bundestag Reichstag Building Berlin',files:[]},
+      {id:'t3',time:'12:00',title:'סיום בפרלמנט — נסיעה לאוניברסיטה',detail:'',loc:'Bundestag Reichstag Building Berlin',files:[]},
+      {id:'t4',time:'14:00',title:'פעילות באוניברסיטה',detail:'',loc:'HWR Berlin Hochschule für Wirtschaft und Recht',files:[]},
+      {id:'t5',time:'17:00',title:'חזרה למלון — זמן חופשי',detail:'עד 19:00',loc:'RIU Plaza Berlin Hotel Germany',files:[]},
+      {id:'t6',time:'19:00',title:'ערב מפקד — מלון קינג דייויד',detail:'יציאה במוניות, סיום משוער 23:00',loc:'Hotel Palace Berlin',files:[]}
+    ]
+  },
+  wed: {
+    label: 'רביעי 29/4',
+    dress: {type:'formal',text:'חליפה ללא עניבה',detail:'👔 לבוש רשמי'},
+    hotel: {name:'RIU Plaza Berlin',dates:'26.4–30.4',loc:'RIU Plaza Berlin Hotel Germany'},
+    events: [
+      {id:'w1',time:'09:00',title:'יציאה בתחב"צ — פעילות בפרלמנט',detail:'סיור + פגישות',loc:'Bundestag Reichstag Building Berlin',files:[]},
+      {id:'w2',time:'13:00',title:'נסיעה ל-Rola Solutions',detail:'',loc:'Rola Solutions GmbH Berlin',files:[]},
+      {id:'w3',time:'14:00',title:'פגישה עם נציגי Rola Solutions',detail:'',loc:'Rola Solutions GmbH Berlin',files:[]},
+      {id:'w4',time:'16:00',title:'סיום — זמן חופשי',detail:'',loc:'',files:[]}
+    ]
+  },
+  thu: {
+    label: 'חמישי 30/4',
+    dress: {type:'casual',text:'לבוש נוח',detail:'👕 אך התחשבו באופי המקום'},
+    hotel: null,
+    events: [
+      {id:'h1',time:'08:00',title:'פינוי חדרים',detail:'טסים: מזוודות לאוטובוס. נשארים: שמירת חפצים במלון',loc:'RIU Plaza Berlin Hotel Germany',files:[]},
+      {id:'h2',time:'09:00',title:'יציאה לוילה ואנזה',detail:'אוטובוס צמוד כל היום',loc:'RIU Plaza Berlin Hotel Germany',files:[]},
+      {id:'h3',time:'10:00',title:'פעילות בוילה ואנזה',detail:'סדנת "בירוקרטים" — תפקיד הפקידים ביישום הפתרון הסופי',loc:'Wannsee Conference House Villa Berlin',files:[]},
+      {id:'h4',time:'15:00',title:'סיום',detail:'טסים: קניון סמוך לשדה. נשארים: חופשי',loc:'',files:[]},
+      {id:'h5',time:'20:55',title:'טיסה לסופיה',detail:'Ryanair',loc:'Berlin Brandenburg Airport BER',files:[]},
+      {id:'h6',time:'00:10',title:'נחיתה בסופיה (שישי)',detail:'שאטל למלון',loc:'Sofia Airport Bulgaria',files:[]},
+      {id:'h7',time:'11:05',title:'המראה מסופיה (שישי)',detail:'אל על LY552',loc:'Sofia Airport Bulgaria',files:[]}
+    ]
+  }
+};
+
+const dayKeys = ['sun','mon','tue','wed','thu'];
+const DAY_DATES = {
+  sun: '2026-04-26',
+  mon: '2026-04-27',
+  tue: '2026-04-28',
+  wed: '2026-04-29',
+  thu: '2026-04-30'
+};
+
+// ==================== STATE ====================
+const preload = (typeof window !== 'undefined' && window.__BERLIN_PRELOAD__) || null;
+let schedule = preload && preload.schedule ? preload.schedule : JSON.parse(JSON.stringify(defaultSchedule));
+let messages = preload && Array.isArray(preload.messages) ? preload.messages : [];
+let isOfflineCopy = !!(preload && preload.offline);
+let reflections = [];
+let seenMsgs = [];
+let currentDay = 'sun';
+let admCurrentDay = 'sun';
+let currentMsgType = 'urgent';
+let editingEvent = null;
+let pressTimer = null;
+let countdownInt = null;
+let currentLoc = null;
+let locWatch = null;
+let currentUploadedImages = [];
+let broadcastQueue = [];
+let currentSheetType = '';
+let cloudAvailable = (typeof window.storage !== 'undefined') && !isOfflineCopy;
+
+// ==================== UTILITIES ====================
+function escHtml(s){
+  if(s==null) return '';
+  return String(s).replace(/[&<>"']/g,m=>({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[m]));
+}
+function todayKey(){
+  const t = new Date();
+  const iso = t.toISOString().slice(0,10);
+  for (const k of dayKeys) if (DAY_DATES[k]===iso) return k;
+  return null;
+}
+function mapUrl(loc){
+  if(!loc) return '';
+  return 'https://www.google.com/maps/search/'+encodeURIComponent(loc);
+}
+function toast(msg,type='info'){
+  const d = document.createElement('div');
+  d.style.cssText='position:fixed;bottom:90px;left:50%;transform:translateX(-50%);background:'+(type==='err'?'var(--red)':'var(--g900)')+';color:#fff;padding:12px 20px;border-radius:10px;z-index:500;font-size:14px;font-weight:600;box-shadow:var(--shadow-lg);animation:fadein .2s';
+  d.textContent=msg;
+  document.body.appendChild(d);
+  setTimeout(()=>d.remove(),2500);
+}
+
+// ==================== CLOUD STORAGE (shared) ====================
+async function cloudGet(key){
+  if(!cloudAvailable) return null;
+  try{
+    const r = await window.storage.get(key, true);
+    return r ? JSON.parse(r.value) : null;
+  }catch(e){ return null; }
+}
+async function cloudSet(key,val){
+  if(!cloudAvailable) return false;
+  try{
+    await window.storage.set(key, JSON.stringify(val), true);
+    return true;
+  }catch(e){
+    console.warn('cloud set err',e);
+    return false;
+  }
+}
+async function loadFromCloud(){
+  try{
+    const [sch, msgs] = await Promise.all([
+      cloudGet('berlin_schedule'),
+      cloudGet('berlin_msgs')
+    ]);
+    if(sch && typeof sch==='object' && sch.sun){ schedule = sch; }
+    if(Array.isArray(msgs)){ messages = msgs; }
+    updateSyncPill(true);
+  }catch(e){
+    updateSyncPill(false);
+  }
+}
+function updateSyncPill(ok){
+  const p = document.getElementById('sync-pill');
+  const t = document.getElementById('sync-txt');
+  if(!p) return;
+  if(ok && cloudAvailable){
+    p.classList.remove('off');
+    t.textContent='ענן פעיל';
+  }else{
+    p.classList.add('off');
+    t.textContent='מקומי בלבד';
+  }
+}
+
+// ==================== LOCAL STORAGE ====================
+function lsGet(key,def){
+  try{const v=localStorage.getItem(key);return v?JSON.parse(v):def;}catch(e){return def;}
+}
+function lsSet(key,val){
+  try{localStorage.setItem(key,JSON.stringify(val));}catch(e){}
+}
+function loadLocal(){
+  seenMsgs = lsGet('berlin_seen',[]);
+  reflections = lsGet('berlin_reflections',[]);
+  document.getElementById('sos-name').value = lsGet('sos_name','')||'';
+  document.getElementById('sos-num').value = lsGet('sos_num','')||'';
+  document.getElementById('sos-grp').value = lsGet('sos_grp','')||'';
+  const itzik = lsGet('itzik_num','')||'';
+  document.getElementById('itzik-num').value = itzik;
+  updateItzikLink(itzik);
+  // also load local copies as fallback
+  const localSch = lsGet('berlin_schedule',null);
+  const localMsgs = lsGet('berlin_msgs',null);
+  if(localSch && localSch.sun) schedule = localSch;
+  if(Array.isArray(localMsgs)) messages = localMsgs;
+}
+
+// ==================== NAVIGATION ====================
+function goPage(p){
+  document.querySelectorAll('.page').forEach(el=>el.classList.remove('on'));
+  const pg = document.getElementById('page-'+p);
+  if(pg) pg.classList.add('on');
+  document.querySelectorAll('.bnav-btn').forEach(b=>b.classList.toggle('on', b.dataset.page===p));
+  window.scrollTo(0,0);
+  if(p==='home') renderHome();
+  if(p==='schedule') renderSchedule();
+  if(p==='reflect'){ renderRefDays(); renderReflections(); }
+  if(p==='admin'){ if(isAdminLogged()) showAdminPanel(); else showAdminLogin(); }
+}
+
+// ==================== WEATHER ====================
+// WMO weather code → icon + Hebrew description
+const WEATHER_CODES = {
+  0:  {ic:'☀️', d:'בהיר'},
+  1:  {ic:'🌤️', d:'בהיר בעיקר'},
+  2:  {ic:'⛅', d:'מעונן חלקית'},
+  3:  {ic:'☁️', d:'מעונן'},
+  45: {ic:'🌫️', d:'ערפל'},
+  48: {ic:'🌫️', d:'ערפל'},
+  51: {ic:'🌦️', d:'טפטוף קל'},
+  53: {ic:'🌦️', d:'טפטוף'},
+  55: {ic:'🌧️', d:'טפטוף חזק'},
+  56: {ic:'🌧️', d:'טפטוף קפוא'},
+  57: {ic:'🌧️', d:'טפטוף קפוא'},
+  61: {ic:'🌦️', d:'גשם קל'},
+  63: {ic:'🌧️', d:'גשם'},
+  65: {ic:'🌧️', d:'גשם חזק'},
+  66: {ic:'🌧️', d:'גשם קפוא'},
+  67: {ic:'🌧️', d:'גשם קפוא'},
+  71: {ic:'🌨️', d:'שלג קל'},
+  73: {ic:'🌨️', d:'שלג'},
+  75: {ic:'❄️', d:'שלג כבד'},
+  77: {ic:'🌨️', d:'גרגירי שלג'},
+  80: {ic:'🌦️', d:'ממטרים קלים'},
+  81: {ic:'🌧️', d:'ממטרים'},
+  82: {ic:'⛈️', d:'ממטרים עזים'},
+  85: {ic:'🌨️', d:'ממטרי שלג'},
+  86: {ic:'❄️', d:'ממטרי שלג עזים'},
+  95: {ic:'⛈️', d:'סופת רעמים'},
+  96: {ic:'⛈️', d:'סופת רעמים עם ברד'},
+  99: {ic:'⛈️', d:'סופת רעמים עם ברד'}
+};
+
+// Seasonal fallback for Berlin end-of-April (climate averages)
+function getSeasonalFallback(){
+  const today = new Date();
+  const dayNames = ['א׳','ב׳','ג׳','ד׳','ה׳','ו׳','ש׳'];
+  // Typical Berlin late-April patterns: mostly partly cloudy, 14-17°/5-8°, occasional light rain
+  const patterns = [
+    {ic:'⛅', desc:'מעונן חלקית', hi:15, lo:6, rain:0},
+    {ic:'🌤️', desc:'בהיר בעיקר',  hi:17, lo:7, rain:0},
+    {ic:'🌦️', desc:'טפטוף אפשרי', hi:14, lo:5, rain:40}
+  ];
+  const days = [];
+  for(let i=0; i<3; i++){
+    const d = new Date(today);
+    d.setDate(d.getDate()+i);
+    let label;
+    if(i===0) label = 'היום';
+    else if(i===1) label = 'מחר';
+    else label = dayNames[d.getDay()]+' '+d.getDate()+'/'+(d.getMonth()+1);
+    days.push(Object.assign({label}, patterns[i]));
+  }
+  return days;
+}
+
+async function loadWeather(){
+  const widget = document.getElementById('weather-widget');
+  if(!widget) return;
+
+  // Check cache (valid for 3 hours) - show instantly if we have fresh data
+  const cached = lsGet('berlin_weather', null);
+  if(cached && cached.ts && (Date.now() - cached.ts < 3*60*60*1000) && cached.data){
+    renderWeatherFromApi(cached.data);
+    return;
+  }
+
+  // Detect Claude artifact sandbox — external fetches are blocked there.
+  // Go straight to seasonal fallback to avoid console noise and flicker.
+  const inArtifact = (()=>{
+    try{
+      const u = window.location.href || '';
+      return /claude\.ai|anthropic|artifact/i.test(u)
+          || u.startsWith('blob:')
+          || u.startsWith('about:')
+          || window.parent !== window; // iframed
+    }catch(e){ return true; }
+  })();
+
+  if(inArtifact){
+    renderWeatherFallback();
+    return;
+  }
+
+  // Show widget with loading state (only when we'll actually fetch)
+  widget.style.display = 'block';
+  widget.innerHTML = `<div class="w-loading">🌤️ טוען תחזית...</div>`;
+
+  try{
+    const url = 'https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Europe%2FBerlin&forecast_days=4';
+    const fetchPromise = fetch(url);
+    const timeoutPromise = new Promise((_, reject)=>
+      setTimeout(()=>reject(new Error('timeout')), 8000)
+    );
+    const res = await Promise.race([fetchPromise, timeoutPromise]);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const data = await res.json();
+    if(!data.daily || !Array.isArray(data.daily.time) || !data.daily.time.length){
+      throw new Error('invalid response');
+    }
+    lsSet('berlin_weather', {ts: Date.now(), data});
+    renderWeatherFromApi(data);
+  } catch(err){
+    // Use any cached data if available (even expired)
+    if(cached && cached.data){
+      renderWeatherFromApi(cached.data);
+      return;
+    }
+    // No cache — show seasonal fallback silently
+    renderWeatherFallback();
+  }
+}
+
+function renderWeatherFromApi(data){
+  const widget = document.getElementById('weather-widget');
+  if(!widget || !data || !data.daily) return;
+
+  const daily = data.daily;
+  const dayNames = ['א׳','ב׳','ג׳','ד׳','ה׳','ו׳','ש׳'];
+
+  const today = new Date().toISOString().slice(0,10);
+  const todayIdx = daily.time.indexOf(today);
+  const startIdx = todayIdx >= 0 ? todayIdx : 0;
+
+  const days = [];
+  for(let i=0; i<3 && (startIdx+i)<daily.time.length; i++){
+    const idx = startIdx + i;
+    const dStr = daily.time[idx];
+    const d = new Date(dStr+'T12:00:00');
+    const code = daily.weather_code[idx];
+    const info = WEATHER_CODES[code] || {ic:'🌡️', d:''};
+    const hi = Math.round(daily.temperature_2m_max[idx]);
+    const lo = Math.round(daily.temperature_2m_min[idx]);
+    const rain = daily.precipitation_probability_max ? daily.precipitation_probability_max[idx] : 0;
+    let label;
+    if(i===0) label = 'היום';
+    else if(i===1) label = 'מחר';
+    else label = dayNames[d.getDay()]+' '+d.getDate()+'/'+(d.getMonth()+1);
+    days.push({label, ic:info.ic, desc:info.d, hi, lo, rain});
+  }
+
+  renderWeatherDays(days, false);
+}
+
+function renderWeatherFallback(){
+  renderWeatherDays(getSeasonalFallback(), true);
+}
+
+function renderWeatherDays(days, isFallback){
+  const widget = document.getElementById('weather-widget');
+  if(!widget) return;
+  widget.style.display = 'block';
+  const subtitle = isFallback
+    ? `<div class="wh-loc" style="font-size:10px">📊 ממוצע עונתי לברלין · סוף אפריל</div>`
+    : `<div class="wh-loc">📍 ברלין · לייב</div>`;
+  widget.innerHTML = `
+    <div class="wh">
+      <div class="wh-title">🌤️ תחזית מזג אוויר</div>
+      ${subtitle}
+    </div>
+    <div class="w-grid">
+      ${days.map(d=>`
+        <div class="w-day">
+          <div class="dn">${escHtml(d.label)}</div>
+          <div class="wi">${d.ic}</div>
+          <div class="wt">${d.hi}°<span class="lo">/${d.lo}°</span></div>
+          <div class="wd">${escHtml(d.desc)}${d.rain>=30?`<br>☔ ${d.rain}%`:''}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function retryWeather(){
+  // Clear cache to force fresh fetch
+  try{ localStorage.removeItem('berlin_weather'); }catch(e){}
+  loadWeather();
+}
+
+// ==================== HOME ====================
+function renderHome(){
+  const h = new Date().getHours();
+  let g = 'שלום';
+  if(h<12) g='☀️ בוקר טוב';
+  else if(h<17) g='🌤️ צהריים טובים';
+  else if(h<21) g='🌇 ערב טוב';
+  else g='🌙 לילה טוב';
+  document.getElementById('greet').textContent = g;
+
+  const tk = todayKey();
+  const strip = document.getElementById('today-strip');
+  if(tk && schedule[tk]){
+    const day = schedule[tk];
+    const now = new Date();
+    const nowMin = now.getHours()*60+now.getMinutes();
+    const upcoming = day.events.filter(e=>{
+      const [hh,mm] = (e.time||'00:00').split(':').map(Number);
+      return (hh*60+mm) >= nowMin-30;
+    }).slice(0,3);
+    const toShow = upcoming.length ? upcoming : day.events.slice(0,3);
+    strip.style.display='block';
+    strip.innerHTML = `<h3>📍 היום — ${escHtml(day.label)}</h3>` +
+      toShow.map(e=>`<div class="today-ev"><div class="t">${escHtml(e.time)}</div><div class="tt">${escHtml(e.title)}</div></div>`).join('') +
+      `<a class="today-more" onclick="goPage('schedule')">כל הלו"ז ←</a>`;
+  } else {
+    strip.style.display='none';
+  }
+}
+
+// ==================== SCHEDULE ====================
+function renderSchedule(){
+  const tabs = document.getElementById('day-tabs');
+  tabs.innerHTML = dayKeys.map(k=>`<button class="tab${k===currentDay?' on':''}" onclick="selectDay('${k}')">${escHtml(schedule[k].label)}</button>`).join('');
+  const cont = document.getElementById('days-container');
+  cont.innerHTML = dayKeys.map(k=>renderDay(k)).join('');
+}
+function selectDay(k){
+  currentDay = k;
+  renderSchedule();
+}
+function renderDay(k){
+  const d = schedule[k];
+  if(!d) return '';
+  const on = k===currentDay ? ' on' : '';
+  let html = `<div class="day-block${on}" id="day-${k}">`;
+  if(d.hotel){
+    html += `<div class="hotel-card"><div><div class="n">🏨 ${escHtml(d.hotel.name)}</div><div class="d">לינה ${escHtml(d.hotel.dates)}</div></div>`;
+    if(d.hotel.loc) html += `<a class="mp" href="${mapUrl(d.hotel.loc)}" target="_blank" rel="noopener">📍 מפה</a>`;
+    html += `</div>`;
+  }
+  if(d.dress){
+    const cls = d.dress.type==='formal' ? 'formal' : 'casual';
+    const ic = d.dress.type==='formal' ? '👔' : '👕';
+    html += `<div class="dress-badge ${cls}">${ic} ${escHtml(d.dress.text)}${d.dress.detail?' · '+escHtml(d.dress.detail):''}</div>`;
+  }
+  html += d.events.map(e=>renderEvent(k,e)).join('');
+  html += `</div>`;
+  return html;
+}
+function renderEvent(dk,e){
+  let files='';
+  if(e.files && e.files.length){
+    files = `<div class="ev-files">${e.files.map((f,i)=>{
+      const ic = f.type.startsWith('image/')?'🖼️':(f.type==='application/pdf'?'📄':'📎');
+      return `<button class="file-chip" onclick="downloadFile('${dk}','${e.id}',${i})">${ic} ${escHtml(f.name)} <span class="sz">${Math.round(f.size/1024)}KB</span></button>`;
+    }).join('')}</div>`;
+  }
+  const mapLink = e.loc ? `<a class="map-link" href="${mapUrl(e.loc)}" target="_blank" rel="noopener">📍 מפה</a>` : '';
+  return `<div class="ev-card">
+    <div class="top-row">
+      <div class="time">${escHtml(e.time)}</div>
+      <div class="title">${escHtml(e.title)}${mapLink}</div>
+      <button class="edit-btn" onclick="openEventEditor('${dk}','${e.id}')" title="ערוך">✏️</button>
+    </div>
+    ${e.detail?`<div class="detail">${escHtml(e.detail)}</div>`:''}
+    ${files}
+  </div>`;
+}
+function downloadFile(dk,eid,idx){
+  const ev = (schedule[dk].events||[]).find(x=>x.id===eid);
+  if(!ev) return;
+  const f = ev.files[idx];
+  if(!f) return;
+  const a = document.createElement('a');
+  a.href = f.data;
+  a.download = f.name;
+  a.click();
+}
+
+// ==================== EVENT EDITOR ====================
+function openEventEditor(dk,eid){
+  const day = schedule[dk];
+  if(!day) return;
+  let ev = day.events.find(x=>x.id===eid);
+  let isNew = false;
+  if(!ev){
+    ev = {id:'e'+Date.now(),time:'12:00',title:'',detail:'',loc:'',files:[]};
+    day.events.push(ev);
+    isNew = true;
+  }
+  editingEvent = {dk, eid: ev.id};
+  currentSheetType='event';
+  document.getElementById('sheet-title').textContent = (isNew?'➕ הוסף':'✏️ ערוך')+' אירוע';
+  document.getElementById('sheet-body').innerHTML = `
+    <div class="field"><label>שעה</label><input type="time" id="ev-time" value="${escHtml(ev.time||'')}"></div>
+    <div class="field"><label>כותרת</label><input type="text" id="ev-title" value="${escHtml(ev.title||'')}"></div>
+    <div class="field"><label>פרטים</label><textarea id="ev-detail" rows="3">${escHtml(ev.detail||'')}</textarea></div>
+    <div class="field"><label>מיקום (לחיפוש במפות)</label>
+      <input type="text" id="ev-loc" value="${escHtml(ev.loc||'')}" oninput="updateMapPrev()">
+      <div id="map-prev"></div>
+    </div>
+    <div class="field"><label>קבצים מצורפים</label>
+      <div class="photo-actions" style="margin-bottom:6px">
+        <button type="button" class="photo-btn camera" onclick="document.getElementById('ev-camera').click()">
+          <span class="ic">📷</span><span>צלם</span>
+        </button>
+        <button type="button" class="photo-btn gallery" onclick="document.getElementById('ev-files').click()">
+          <span class="ic">📎</span><span>קובץ</span>
+        </button>
+      </div>
+      <input type="file" id="ev-camera" accept="image/*" capture="environment" style="display:none">
+      <input type="file" id="ev-files" multiple style="display:none">
+      <div id="ev-files-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
+    </div>
+  `;
+  document.getElementById('sheet-actions').style.display='flex';
+  document.getElementById('sheet-actions').innerHTML = `
+    <button class="btn btn-ghost" style="flex:1" onclick="closeSheet()">ביטול</button>
+    <button class="btn btn-primary" style="flex:2" onclick="saveEvent()">💾 שמור</button>
+  `;
+  document.getElementById('ev-files').addEventListener('change',handleEventFiles);
+  document.getElementById('ev-camera').addEventListener('change',handleEventFiles);
+  renderEventFileList(ev);
+  updateMapPrev();
+  openSheet();
+}
+function updateMapPrev(){
+  const loc = document.getElementById('ev-loc').value.trim();
+  const prev = document.getElementById('map-prev');
+  if(loc){
+    prev.innerHTML = `<a class="map-preview" href="${mapUrl(loc)}" target="_blank" rel="noopener">📍 ${escHtml(loc)}</a>`;
+  } else {
+    prev.innerHTML = '';
+  }
+}
+async function handleEventFiles(e){
+  const files = Array.from(e.target.files);
+  if(!editingEvent) return;
+  const ev = schedule[editingEvent.dk].events.find(x=>x.id===editingEvent.eid);
+  if(!ev) return;
+  for(const f of files){
+    try{
+      if(f.type.startsWith('image/')){
+        const comp = await compressImage(f);
+        // Calculate size from base64 string
+        const sizeBytes = Math.round((comp.data.length - 'data:image/jpeg;base64,'.length) * 0.75);
+        ev.files.push({name:comp.name,type:'image/jpeg',size:sizeBytes,data:comp.data});
+      } else {
+        const r = new FileReader();
+        await new Promise((res,rej)=>{
+          r.onload = ()=>{
+            ev.files.push({name:f.name,type:f.type,size:f.size,data:r.result});
+            res();
+          };
+          r.onerror = rej;
+          r.readAsDataURL(f);
+        });
+      }
+      renderEventFileList(ev);
+    }catch(err){
+      toast('❌ שגיאה בטעינת קובץ','err');
+    }
+  }
+  e.target.value='';
+}
+function renderEventFileList(ev){
+  const box = document.getElementById('ev-files-list');
+  if(!box) return;
+  box.innerHTML = (ev.files||[]).map((f,i)=>{
+    const ic = f.type.startsWith('image/')?'🖼️':(f.type==='application/pdf'?'📄':'📎');
+    return `<div class="file-chip">${ic} ${escHtml(f.name)} <span class="sz">${Math.round(f.size/1024)}KB</span> <button style="margin-right:6px;color:var(--red);font-weight:700" onclick="removeEvFile(${i})">✕</button></div>`;
+  }).join('');
+}
+function removeEvFile(i){
+  const ev = schedule[editingEvent.dk].events.find(x=>x.id===editingEvent.eid);
+  ev.files.splice(i,1);
+  renderEventFileList(ev);
+}
+async function saveEvent(){
+  if(!editingEvent) return;
+  const ev = schedule[editingEvent.dk].events.find(x=>x.id===editingEvent.eid);
+  if(!ev) return;
+  ev.time = document.getElementById('ev-time').value;
+  ev.title = document.getElementById('ev-title').value.trim();
+  ev.detail = document.getElementById('ev-detail').value.trim();
+  ev.loc = document.getElementById('ev-loc').value.trim();
+  // sort events by time
+  schedule[editingEvent.dk].events.sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+  await persistSchedule();
+  closeSheet();
+  renderSchedule();
+  if(document.getElementById('page-admin').classList.contains('on')) renderAdmEvents();
+  toast('✅ האירוע נשמר');
+}
+async function persistSchedule(){
+  lsSet('berlin_schedule', schedule);
+  const ok = await cloudSet('berlin_schedule', schedule);
+  updateSyncPill(ok);
+}
+
+// ==================== SHEET ====================
+function openSheet(){
+  document.getElementById('sheet-overlay').classList.add('on');
+  document.getElementById('sheet').classList.add('on');
+  document.body.style.overflow = 'hidden';
+}
+function closeSheet(){
+  document.getElementById('sheet-overlay').classList.remove('on');
+  document.getElementById('sheet').classList.remove('on');
+  document.body.style.overflow = '';
+  editingEvent = null;
+  currentSheetType='';
+}
+
+// ==================== SECURITY ====================
+function updateItzikLink(num){
+  const display = document.getElementById('itzik-display');
+  if(!display) return;
+  if(num && num.trim()){
+    display.style.display='block';
+    display.innerHTML = '📞 ' + escHtml(num.trim());
+  } else {
+    display.style.display='none';
+  }
+}
+function saveItzik(){
+  const v = document.getElementById('itzik-num').value.trim();
+  lsSet('itzik_num', v);
+  updateItzikLink(v);
+  toast('✅ נשמר');
+}
+
+// ==================== REFLECT ====================
+function renderRefDays(){
+  const sel = document.getElementById('ref-day');
+  sel.innerHTML = dayKeys.map(k=>`<option value="${k}">${escHtml(schedule[k].label)}</option>`).join('');
+  const tk = todayKey();
+  if(tk) sel.value = tk;
+}
+// Compress image to reasonable size before storing as base64
+function compressImage(file, maxDim=1600, quality=0.82){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onerror = ()=>reject(new Error('read fail'));
+    reader.onload = ()=>{
+      const img = new Image();
+      img.onerror = ()=>{
+        // Fallback: store raw if image can't be decoded
+        resolve({data: reader.result, name: file.name});
+      };
+      img.onload = ()=>{
+        try{
+          let w = img.width, h = img.height;
+          if(w > maxDim || h > maxDim){
+            if(w > h){ h = Math.round(h * (maxDim/w)); w = maxDim; }
+            else     { w = Math.round(w * (maxDim/h)); h = maxDim; }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          resolve({data: dataUrl, name: file.name.replace(/\.[^.]+$/,'') + '.jpg'});
+        }catch(e){
+          resolve({data: reader.result, name: file.name});
+        }
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleRefFiles(fileList){
+  const files = Array.from(fileList);
+  for(const f of files){
+    try{
+      const compressed = await compressImage(f);
+      currentUploadedImages.push(compressed);
+      renderRefImgPreview();
+    }catch(e){
+      toast('❌ שגיאה בטעינת תמונה','err');
+    }
+  }
+}
+
+document.getElementById('ref-imgs').addEventListener('change', async e=>{
+  await handleRefFiles(e.target.files);
+  e.target.value='';
+});
+document.getElementById('ref-camera').addEventListener('change', async e=>{
+  await handleRefFiles(e.target.files);
+  e.target.value='';
+});
+function renderRefImgPreview(){
+  const box = document.getElementById('ref-img-preview');
+  box.innerHTML = currentUploadedImages.map((im,i)=>`<div class="cell"><img src="${im.data}"><button class="rm" onclick="rmRefImg(${i})">✕</button></div>`).join('');
+}
+function rmRefImg(i){
+  currentUploadedImages.splice(i,1);
+  renderRefImgPreview();
+}
+function saveReflection(){
+  const day = document.getElementById('ref-day').value;
+  const txt = document.getElementById('ref-text').value.trim();
+  if(!txt){ toast('✋ אנא כתוב טקסט לפני שמירה','err'); return; }
+  const now = new Date();
+  reflections.push({
+    id: 'r'+Date.now(),
+    day,
+    dayLabel: schedule[day].label,
+    text: txt,
+    images: currentUploadedImages.slice(),
+    ts: now.toISOString(),
+    timeStr: now.toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
+  });
+  lsSet('berlin_reflections', reflections);
+  document.getElementById('ref-text').value='';
+  currentUploadedImages = [];
+  renderRefImgPreview();
+  renderReflections();
+  toast('✅ הרפלקציה נשמרה');
+}
+function renderReflections(){
+  const box = document.getElementById('ref-cards');
+  if(!reflections.length){
+    box.innerHTML = `<div style="color:var(--g600);font-size:13px;text-align:center;padding:14px">עדיין לא שמרת רפלקציות</div>`;
+    document.getElementById('ref-report-btn').style.display='none';
+    return;
+  }
+  box.innerHTML = reflections.slice().reverse().map(r=>`
+    <div class="ref-saved-card">
+      <div class="meta"><span class="day">${escHtml(r.dayLabel)}</span><span>${escHtml(r.timeStr)}</span></div>
+      <div class="txt">${escHtml(r.text)}</div>
+      ${r.images && r.images.length ? `<div class="thumbs">${r.images.map(im=>`<img src="${im.data}">`).join('')}</div>`: ''}
+      <button class="rm" onclick="removeReflection('${r.id}')">🗑️ מחק</button>
+    </div>
+  `).join('');
+  document.getElementById('ref-report-btn').style.display='block';
+}
+function removeReflection(id){
+  if(!confirm('למחוק את הרפלקציה?')) return;
+  reflections = reflections.filter(r=>r.id!==id);
+  lsSet('berlin_reflections', reflections);
+  renderReflections();
+}
+function showReport(){
+  const name = lsGet('sos_name','') || 'משתתף משלחת';
+  const date = new Date().toLocaleDateString('he-IL');
+  const byDay = {};
+  dayKeys.forEach(k=>byDay[k]=[]);
+  reflections.forEach(r=>{ if(byDay[r.day]) byDay[r.day].push(r); });
+  let html = `<div class="report-wrap">
+    <div class="report-hdr">
+      <div class="logo">🇩🇪✈️</div>
+      <h2>דו"ח רפלקציה — משלחת ברלין 2026</h2>
+      <div class="sub">${escHtml(name)} · ${escHtml(date)}</div>
+    </div>`;
+  dayKeys.forEach(k=>{
+    if(!byDay[k].length) return;
+    html += `<div class="report-day"><h3>${escHtml(schedule[k].label)}</h3>`;
+    byDay[k].forEach(r=>{
+      html += `<div class="report-ref">
+        <div class="tm">${escHtml(r.timeStr)}</div>
+        <div class="tx">${escHtml(r.text)}</div>
+        ${r.images && r.images.length?`<div class="imgs">${r.images.map(im=>`<img src="${im.data}">`).join('')}</div>`:''}
+      </div>`;
+    });
+    html += `</div>`;
+  });
+  html += `<div style="text-align:center;margin-top:18px" class="no-print">
+    <button class="btn btn-primary" onclick="window.print()">🖨️ הדפס / שמור PDF</button>
+    <button class="btn btn-ghost" style="margin-right:6px" onclick="closeReport()">סגור</button>
+  </div></div>`;
+  const rp = document.getElementById('report-page');
+  rp.innerHTML = html;
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+  rp.classList.add('on');
+  rp.style.display='block';
+  window.scrollTo(0,0);
+}
+function closeReport(){
+  document.getElementById('report-page').style.display='';
+  goPage('reflect');
+}
+
+// ==================== SOS ====================
+function startLocation(){
+  const statusEl = document.getElementById('loc-status');
+  const coordEl = document.getElementById('loc-coord');
+  const hintEl = document.getElementById('loc-hint');
+
+  if(!navigator.geolocation){
+    if(statusEl) statusEl.innerHTML = '🔴 אין תמיכה במיקום בדפדפן';
+    return;
+  }
+
+  // Check if we're on an insecure context (file:// or http:)
+  // Geolocation API requires HTTPS or localhost
+  if(!window.isSecureContext){
+    if(statusEl) statusEl.innerHTML = '🔴 מיקום דורש חיבור מאובטח (https)';
+    if(hintEl){
+      hintEl.style.display='block';
+      hintEl.innerHTML = '⚠️ הדפדפן חוסם מיקום מקובץ מקומי. פתח את האפליקציה דרך אירוח https כדי להפעיל.';
+    }
+    return;
+  }
+
+  // Detect if we're in an iframe sandbox that likely blocks geolocation
+  if(isInSandbox()){
+    if(statusEl) statusEl.innerHTML = '🟠 מיקום חסום בסביבה הזו';
+    if(hintEl){
+      hintEl.style.display='block';
+      hintEl.innerHTML = 'ℹ️ בסביבת Claude המיקום חסום. הורד את האפליקציה דרך כפתור השיתוף לקבלת מיקום מלא.';
+    }
+    return;
+  }
+
+  if(statusEl) statusEl.innerHTML = '🟡 מאתר מיקום...';
+  if(hintEl) hintEl.style.display='none';
+
+  locWatch = navigator.geolocation.watchPosition(
+    pos=>{
+      currentLoc = pos;
+      if(statusEl) statusEl.innerHTML = `🟢 נמצא · דיוק ±${Math.round(pos.coords.accuracy)}מ'`;
+      if(coordEl) coordEl.textContent = pos.coords.latitude.toFixed(5)+', '+pos.coords.longitude.toFixed(5);
+      if(hintEl) hintEl.style.display='none';
+    },
+    err=>{
+      let msg = 'שגיאה לא ידועה';
+      let hint = '';
+      if(err.code===1){
+        msg = '🔴 הרשאת מיקום נדחתה';
+        hint = 'אפשר מיקום: הגדרות דפדפן → Privacy → Location → אפשר לאתר הזה';
+      } else if(err.code===2){
+        msg = '🔴 לא ניתן לאתר מיקום';
+        hint = 'ודא ש-GPS/מיקום פעיל במכשיר';
+      } else if(err.code===3){
+        msg = '🔴 זמן האיתור עבר';
+        hint = 'לחץ "בקש מיקום" לניסיון נוסף';
+      }
+      if(statusEl) statusEl.innerHTML = msg;
+      if(hintEl && hint){
+        hintEl.style.display='block';
+        hintEl.innerHTML = '⚠️ '+hint;
+      }
+    },
+    {enableHighAccuracy:true, maximumAge:10000, timeout:15000}
+  );
+}
+function refreshLocation(){
+  if(locWatch!=null){ navigator.geolocation.clearWatch(locWatch); locWatch=null; }
+  // On explicit refresh, also do a getCurrentPosition to trigger fresh permission prompt if needed
+  const statusEl = document.getElementById('loc-status');
+  if(statusEl) statusEl.innerHTML = '🟡 מבקש מיקום חדש...';
+  if(navigator.geolocation && window.isSecureContext && !isInSandbox()){
+    navigator.geolocation.getCurrentPosition(
+      pos=>{
+        currentLoc = pos;
+        startLocation(); // restart the watch
+      },
+      err=>{
+        startLocation(); // let startLocation handle the error display
+      },
+      {enableHighAccuracy:true, maximumAge:0, timeout:15000}
+    );
+  } else {
+    startLocation();
+  }
+}
+function buildSOSMessage(){
+  const name = lsGet('sos_name','') || 'משתתף משלחת';
+  const now = new Date().toLocaleString('he-IL');
+  let locPart = 'מיקום: לא זמין';
+  let mapPart = '';
+  if(currentLoc){
+    const lat = currentLoc.coords.latitude.toFixed(5);
+    const lon = currentLoc.coords.longitude.toFixed(5);
+    const acc = Math.round(currentLoc.coords.accuracy);
+    locPart = `📍 מיקום: ${lat}, ${lon} (דיוק ±${acc}מ')`;
+    mapPart = `\n\n📍 קישור למפה:\nhttps://maps.google.com/?q=${lat},${lon}`;
+  }
+  return `🚨 *התראת מצוקה – משלחת ברלין 2026*\n\n👤 שם: ${name}\n${locPart}${mapPart}\n\n🕐 שעה: ${now}\n\nנדרש סיוע מיידי!\n☎️ משטרת ברלין: *110*`;
+}
+function sendWhatsAppNow(){
+  const num = lsGet('sos_num','').replace(/[^0-9]/g,'');
+  const grp = lsGet('sos_grp','');
+  const msg = encodeURIComponent(buildSOSMessage());
+  if(grp){
+    safeOpen(grp);
+    setTimeout(()=>{
+      if(num){ safeOpen(`https://wa.me/${num}?text=${msg}`); }
+    },500);
+    return;
+  }
+  if(!num){ toast('✋ הגדר מספר WhatsApp בהגדרות','err'); return; }
+  safeOpen(`https://wa.me/${num}?text=${msg}`);
+}
+function saveSOSSettings(){
+  lsSet('sos_name',document.getElementById('sos-name').value);
+  lsSet('sos_num',document.getElementById('sos-num').value);
+  lsSet('sos_grp',document.getElementById('sos-grp').value);
+  toast('✅ הגדרות נשמרו');
+}
+
+// SOS button long press
+(function(){
+  const btn = document.getElementById('sos-btn');
+  function startPress(e){
+    e.preventDefault();
+    btn.classList.add('pressed');
+    pressTimer = setTimeout(triggerCD, 2000);
+  }
+  function cancelPress(){
+    btn.classList.remove('pressed');
+    if(pressTimer){ clearTimeout(pressTimer); pressTimer=null; }
+  }
+  btn.addEventListener('mousedown',startPress);
+  btn.addEventListener('touchstart',startPress,{passive:false});
+  btn.addEventListener('mouseup',cancelPress);
+  btn.addEventListener('mouseleave',cancelPress);
+  btn.addEventListener('touchend',cancelPress);
+  btn.addEventListener('touchcancel',cancelPress);
+})();
+// Helper: get a fresh location with a timeout, returns a promise
+function getLocationFresh(timeoutMs){
+  return new Promise(resolve=>{
+    if(!navigator.geolocation){ resolve(null); return; }
+    let settled = false;
+    const to = setTimeout(()=>{
+      if(settled) return;
+      settled = true;
+      // Return whatever we have cached even if fresh attempt timed out
+      resolve(currentLoc || null);
+    }, timeoutMs);
+    navigator.geolocation.getCurrentPosition(
+      pos=>{
+        if(settled) return;
+        settled = true;
+        clearTimeout(to);
+        currentLoc = pos;
+        resolve(pos);
+      },
+      ()=>{
+        if(settled) return;
+        settled = true;
+        clearTimeout(to);
+        resolve(currentLoc || null);
+      },
+      {enableHighAccuracy:true, timeout:timeoutMs-200, maximumAge:10000}
+    );
+  });
+}
+
+// Detect if we're running inside a sandboxed iframe (Claude Artifact, etc.)
+// In sandboxes, tel: / external app protocols don't work — we show a visible
+// fallback UI instead of trying to navigate (which would break the page).
+function isInSandbox(){
+  try{
+    if(window.parent !== window) return true;
+    const u = window.location.href || '';
+    if(/claude\.ai|anthropic|artifact/i.test(u)) return true;
+    if(u.startsWith('blob:') || u.startsWith('about:')) return true;
+    return false;
+  }catch(e){
+    return true; // If we can't access parent, we're almost certainly sandboxed
+  }
+}
+
+// Safe phone call - shows a dialog with the number when we can't dial directly
+function safeCall(number){
+  const clean = String(number).replace(/[^0-9+]/g,'');
+  const tel = 'tel:'+clean;
+
+  // In sandbox, dialer won't open — show a clear dialog instead
+  if(isInSandbox()){
+    showCallDialog(clean);
+    return;
+  }
+
+  // On real mobile browsers: use a link click — most reliable for tel: URIs
+  try{
+    const a = document.createElement('a');
+    a.href = tel;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>a.remove(), 500);
+    return;
+  }catch(e){}
+  // Fallback: show dialog
+  showCallDialog(clean);
+}
+
+// Show a dialog with the phone number, copy-to-clipboard, and a manual retry
+function showCallDialog(number){
+  // If a sheet is already open (e.g., SOS actions panel), replace its content
+  // instead of opening a nested sheet (which breaks — only one sheet can exist).
+  const sheetEl = document.getElementById('sheet');
+  const alreadyOpen = sheetEl.classList.contains('on');
+
+  const htmlContent = `
+    <div style="text-align:center;padding:20px 0">
+      <div style="font-size:36px;font-weight:800;color:var(--red);letter-spacing:2px;margin-bottom:8px">${escHtml(number)}</div>
+      <div style="color:var(--g600);font-size:13px;margin-bottom:20px">לחץ על "חייג" לפתיחת אפליקציית הטלפון</div>
+      <a href="tel:${escHtml(number)}" class="btn btn-danger" style="padding:16px 40px;font-size:17px;text-decoration:none;display:inline-block">
+        📞 חייג עכשיו
+      </a>
+    </div>
+    <button class="btn btn-ghost btn-full" onclick="copyNumber('${escHtml(number)}')" style="margin-bottom:8px">
+      📋 העתק מספר
+    </button>
+    <div style="background:var(--amber-l);border:1px solid var(--amber);border-radius:10px;padding:10px;margin-top:10px;font-size:12px;color:#7a5600;line-height:1.5">
+      ℹ️ אם החיוג לא עובד — העתק את המספר וחייג ידנית מאפליקציית הטלפון. בסביבות מאובטחות (כמו Claude) חיוג ישיר עשוי להיות חסום.
+    </div>
+    <button class="btn btn-primary btn-full" onclick="closeSheetToHome()" style="margin-top:14px">
+      🏠 חזור לדף הבית
+    </button>
+  `;
+
+  currentSheetType='callDialog';
+  document.getElementById('sheet-title').textContent='📞 חיוג למספר ' + number;
+  document.getElementById('sheet-body').innerHTML = htmlContent;
+  document.getElementById('sheet-actions').style.display='none';
+
+  if(!alreadyOpen){
+    openSheet();
+  }
+  // Scroll the sheet body to top so dialog is visible
+  document.getElementById('sheet-body').scrollTop = 0;
+}
+
+function copyNumber(number){
+  navigator.clipboard.writeText(number).then(
+    ()=>toast('✅ המספר '+number+' הועתק'),
+    ()=>toast('⚠️ חייג ידנית: '+number, 'err')
+  );
+}
+
+// Safe external link opener (for WhatsApp, maps, group chat)
+function safeOpen(url){
+  try{
+    const w = window.open(url, '_blank', 'noopener');
+    if(w) return true;
+  }catch(e){}
+  try{
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return true;
+  }catch(e){
+    return false;
+  }
+}
+
+async function triggerCD(){
+  // Start getting a fresh location in the background immediately
+  const locPromise = getLocationFresh(4500);
+
+  const overlay = document.getElementById('cd-overlay');
+  overlay.classList.add('on');
+  let s = 5;
+  document.getElementById('cd-num').textContent = s;
+  document.getElementById('cd-sec').textContent = s;
+
+  await new Promise(resolve=>{
+    countdownInt = setInterval(()=>{
+      s--;
+      document.getElementById('cd-num').textContent = s;
+      document.getElementById('cd-sec').textContent = s;
+      if(s<=0){
+        clearInterval(countdownInt); countdownInt=null;
+        resolve();
+      }
+    }, 1000);
+  });
+
+  // If user cancelled during countdown, countdownInt will have been cleared
+  // and overlay hidden by cancelCountdown — check that flag
+  if(!overlay.classList.contains('on')) return;
+
+  // Wait up to 4.5s more for location (in parallel with countdown most of this time already elapsed)
+  await locPromise;
+
+  // Hide overlay. Stay on SOS page (user is already focused there) — the SOS
+  // page is always valid and visible. Show actions panel on top.
+  overlay.classList.remove('on');
+  // Make sure SOS page is actually visible (not broken/hidden)
+  goPage('sos');
+  // Show the post-trigger panel with clear action buttons.
+  showSOSActionsPanel();
+}
+
+function showSOSActionsPanel(){
+  const msg = buildSOSMessage();
+  const num = lsGet('sos_num','').replace(/[^0-9]/g,'');
+  const grp = lsGet('sos_grp','');
+  const waUrl = num ? `https://wa.me/${num}?text=${encodeURIComponent(msg)}` : '';
+  const grpUrl = grp || '';
+  const hasLocation = !!currentLoc;
+  const mapUrl = currentLoc ? `https://maps.google.com/?q=${currentLoc.coords.latitude.toFixed(5)},${currentLoc.coords.longitude.toFixed(5)}` : '';
+
+  currentSheetType='sosActions';
+  document.getElementById('sheet-title').textContent='🚨 שליחת הודעת חירום';
+
+  const locBadge = hasLocation
+    ? `<div style="background:var(--green-l);color:var(--green);padding:6px 10px;border-radius:6px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:4px;margin-top:6px">✅ מיקום זמין · דיוק ±${Math.round(currentLoc.coords.accuracy)}מ'</div>`
+    : `<div style="background:var(--amber-l);color:var(--amber);padding:6px 10px;border-radius:6px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:4px;margin-top:6px">⚠️ מיקום לא זמין — ההודעה תישלח בלי מיקום</div>`;
+
+  document.getElementById('sheet-body').innerHTML = `
+    <div style="background:var(--red-l);border:1px solid var(--red);border-radius:10px;padding:12px;margin-bottom:14px;font-size:13px;line-height:1.5;color:var(--red)">
+      <strong>התראת החירום הופעלה.</strong><br>
+      שלח הודעה לאחת מהכתובות:
+      ${locBadge}
+    </div>
+
+    ${waUrl ? `<button class="btn btn-success btn-full" onclick="safeOpen(${JSON.stringify(waUrl)})" style="margin-bottom:8px;padding:16px;font-size:16px">
+      💬 שלח WhatsApp לאיש קשר
+    </button>` : `<div style="background:var(--amber-l);padding:10px;border-radius:8px;margin-bottom:8px;font-size:13px;color:#7a5600">
+      ⚠️ לא הוגדר מספר WhatsApp. עבור להגדרות SOS להוסיף.
+    </div>`}
+
+    ${grpUrl ? `<button class="btn btn-primary btn-full" onclick="safeOpen(${JSON.stringify(grpUrl)})" style="margin-bottom:8px">
+      👥 פתח קבוצת WhatsApp
+    </button>` : ''}
+
+    ${hasLocation ? `<button class="btn btn-ghost btn-full" onclick="safeOpen(${JSON.stringify(mapUrl)})" style="margin-bottom:8px">
+      🗺️ הצג מיקום במפה
+    </button>` : ''}
+
+    <button class="btn btn-ghost btn-full" onclick="copySOSMessage()" style="margin-bottom:8px">
+      📋 העתק את הודעת החירום
+    </button>
+
+    <div style="background:var(--amber-l);border:1px solid var(--amber);border-radius:8px;padding:10px;margin-top:10px;font-size:12px;color:#7a5600;line-height:1.5">
+      <strong>📞 במקרה חירום אמיתי:</strong><br>
+      פתח את אפליקציית הטלפון וחייג <strong>110</strong> (משטרת ברלין) או <strong>112</strong> (אמבולנס).
+    </div>
+
+    <details style="margin-top:12px">
+      <summary style="font-size:12px;color:var(--g600);cursor:pointer;padding:4px">📝 תצוגה מקדימה של ההודעה</summary>
+      <pre style="white-space:pre-wrap;margin-top:8px;padding:10px;background:var(--g50);border-radius:8px;font-family:inherit;font-size:11px;color:var(--g900);line-height:1.5">${escHtml(msg)}</pre>
+    </details>
+
+    <button class="btn btn-primary btn-full" onclick="closeSheetToHome()" style="margin-top:14px;padding:14px">
+      🏠 סגור וחזור לדף הבית
+    </button>
+  `;
+  document.getElementById('sheet-actions').style.display='none';
+  openSheet();
+}
+
+// Force-close any sheet and return to home. Used as the "escape hatch"
+// from emergency panels.
+function closeSheetToHome(){
+  closeSheet();
+  goPage('home');
+}
+
+function copySOSMessage(){
+  const msg = buildSOSMessage();
+  navigator.clipboard.writeText(msg).then(
+    ()=>toast('✅ הודעת המצוקה הועתקה'),
+    ()=>toast('❌ שגיאה בהעתקה','err')
+  );
+}
+function cancelCountdown(){
+  if(countdownInt){ clearInterval(countdownInt); countdownInt=null; }
+  document.getElementById('cd-overlay').classList.remove('on');
+}
+
+// ==================== ADMIN ====================
+function isAdminLogged(){ return sessionStorage.getItem('berlin_adm')==='1'; }
+function showAdminLogin(){
+  document.getElementById('admin-login').style.display='block';
+  document.getElementById('admin-panel').style.display='none';
+  document.getElementById('admin-err').textContent='';
+  document.getElementById('admin-pwd').value='';
+}
+function showAdminPanel(){
+  document.getElementById('admin-login').style.display='none';
+  document.getElementById('admin-panel').style.display='block';
+  renderAdmDaySel();
+  renderAdmEvents();
+  renderMsgHistory();
+  updateSyncPill(cloudAvailable);
+}
+function adminLogin(){
+  const pwd = document.getElementById('admin-pwd').value;
+  const stored = lsGet('berlin_adm_pwd','berlin2026');
+  if(pwd===stored){
+    sessionStorage.setItem('berlin_adm','1');
+    showAdminPanel();
+  } else {
+    document.getElementById('admin-err').textContent = '❌ סיסמה שגויה';
+  }
+}
+function adminLogout(){
+  sessionStorage.removeItem('berlin_adm');
+  showAdminLogin();
+}
+function switchAdm(k){
+  document.querySelectorAll('.adm-tab').forEach(b=>b.classList.toggle('on',b.dataset.adm===k));
+  document.querySelectorAll('.adm-panel').forEach(p=>p.classList.remove('on'));
+  document.getElementById('adm-'+k).classList.add('on');
+}
+function renderAdmDaySel(){
+  const sel = document.getElementById('adm-day-sel');
+  sel.innerHTML = dayKeys.map(k=>`<button class="day-btn${k===admCurrentDay?' on':''}" onclick="admSelectDay('${k}')">${escHtml(schedule[k].label)}</button>`).join('');
+}
+function admSelectDay(k){ admCurrentDay=k; renderAdmDaySel(); renderAdmEvents(); }
+function renderAdmEvents(){
+  const box = document.getElementById('adm-events');
+  const d = schedule[admCurrentDay];
+  if(!d || !d.events.length){
+    box.innerHTML = `<div style="color:var(--g600);text-align:center;padding:20px;font-size:13px">אין אירועים ביום זה</div>`;
+    return;
+  }
+  box.innerHTML = d.events.map(e=>`
+    <div class="adm-ev">
+      <div class="tb">${escHtml(e.time||'--:--')}</div>
+      <div class="info">
+        <div class="tt">${escHtml(e.title||'(ללא כותרת)')}</div>
+        <div class="mt">${escHtml(e.loc||'ללא מיקום')} · ${e.files?e.files.length:0} קבצים</div>
+      </div>
+      <div class="acts">
+        <button onclick="openEventEditor('${admCurrentDay}','${e.id}')">✏️</button>
+        <button onclick="deleteEvent('${admCurrentDay}','${e.id}')">🗑️</button>
+      </div>
+    </div>
+  `).join('');
+}
+function addNewEvent(){
+  openEventEditor(admCurrentDay,'__NEW__');
+}
+async function deleteEvent(dk,eid){
+  if(!confirm('למחוק את האירוע?')) return;
+  schedule[dk].events = schedule[dk].events.filter(e=>e.id!==eid);
+  await persistSchedule();
+  renderAdmEvents();
+  renderSchedule();
+  toast('✅ נמחק');
+}
+function pickMsgType(t){
+  currentMsgType = t;
+  document.querySelectorAll('#msg-type button').forEach(b=>{
+    b.classList.remove('on','urgent','info','update');
+    if(b.dataset.t===t){ b.classList.add('on',t); }
+  });
+}
+async function sendBroadcast(){
+  const title = document.getElementById('msg-title').value.trim();
+  const body = document.getElementById('msg-body').value.trim();
+  if(!title || !body){ toast('✋ מלא כותרת ותוכן','err'); return; }
+  const msg = {
+    id: 'm'+Date.now(),
+    type: currentMsgType,
+    title, body,
+    ts: new Date().toISOString()
+  };
+  messages.push(msg);
+  lsSet('berlin_msgs', messages);
+  const ok = await cloudSet('berlin_msgs', messages);
+  updateSyncPill(ok);
+  document.getElementById('msg-title').value='';
+  document.getElementById('msg-body').value='';
+  renderMsgHistory();
+  toast('✅ ההודעה נשלחה');
+  // show to self immediately
+  showBroadcast(msg);
+}
+function renderMsgHistory(){
+  const box = document.getElementById('msg-history');
+  if(!messages.length){
+    box.innerHTML = `<div style="color:var(--g600);text-align:center;padding:16px;font-size:13px">עוד לא נשלחו הודעות</div>`;
+    return;
+  }
+  box.innerHTML = messages.slice().reverse().map(m=>`
+    <div class="msg-hist">
+      <div class="h">
+        <span class="tag ${m.type}">${m.type==='urgent'?'🚨 דחוף':(m.type==='info'?'ℹ️ מידע':'✅ עדכון')}</span>
+        <span style="color:var(--g600)">${new Date(m.ts).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span>
+      </div>
+      <div class="tt">${escHtml(m.title)}</div>
+      <div class="bd">${escHtml(m.body)}</div>
+    </div>
+  `).join('');
+}
+function changePwd(){
+  const v = document.getElementById('new-pwd').value.trim();
+  if(!v || v.length<4){ toast('✋ לפחות 4 תווים','err'); return; }
+  lsSet('berlin_adm_pwd', v);
+  document.getElementById('new-pwd').value='';
+  toast('✅ הסיסמה עודכנה');
+}
+async function forceCloudSync(){
+  await loadFromCloud();
+  renderSchedule();
+  renderMsgHistory();
+  checkBroadcasts();
+  toast('🔄 סונכרן מהענן');
+}
+function exportBackup(){
+  const data = {schedule, messages, exported: new Date().toISOString()};
+  const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'berlin2026_backup_'+new Date().toISOString().slice(0,10)+'.json';
+  a.click();
+}
+async function deleteAllMessages(){
+  if(!confirm('למחוק את כל ההודעות לכולם? פעולה זו בלתי הפיכה.')) return;
+  messages = [];
+  seenMsgs = [];
+  broadcastQueue = [];
+  document.getElementById('bc-overlay').classList.remove('on');
+  lsSet('berlin_msgs', messages);
+  lsSet('berlin_seen', seenMsgs);
+  const ok = await cloudSet('berlin_msgs', messages);
+  updateSyncPill(ok);
+  renderMsgHistory();
+  toast('🗑️ כל ההודעות נמחקו');
+}
+
+// ==================== BROADCAST ====================
+function checkBroadcasts(){
+  seenMsgs = lsGet('berlin_seen',[]);
+  // Don't show if popup already open
+  if(document.getElementById('bc-overlay').classList.contains('on')) return;
+  // Only show messages from the last 24 hours to prevent old-message loops
+  const cutoff = Date.now() - 24*60*60*1000;
+  const unseen = messages.filter(m=>{
+    if(seenMsgs.includes(m.id)) return false;
+    const ts = new Date(m.ts).getTime();
+    return ts > cutoff;
+  });
+  // Mark older unseen as seen automatically
+  let changed = false;
+  messages.forEach(m=>{
+    if(!seenMsgs.includes(m.id)){
+      const ts = new Date(m.ts).getTime();
+      if(ts <= cutoff){ seenMsgs.push(m.id); changed=true; }
+    }
+  });
+  if(changed) lsSet('berlin_seen', seenMsgs);
+  broadcastQueue = unseen.slice();
+  if(broadcastQueue.length) showNextBroadcast();
+}
+function markAllSeen(){
+  seenMsgs = messages.map(m=>m.id);
+  lsSet('berlin_seen', seenMsgs);
+  broadcastQueue = [];
+  document.getElementById('bc-overlay').classList.remove('on');
+  toast('✅ כל ההודעות סומנו כנקראו');
+}
+function showNextBroadcast(){
+  if(!broadcastQueue.length) return;
+  const m = broadcastQueue[0];
+  showBroadcast(m);
+}
+function showBroadcast(m){
+  document.getElementById('bc-head').className = 'bc-head '+m.type;
+  document.getElementById('bc-ic').textContent = m.type==='urgent'?'🚨':(m.type==='info'?'ℹ️':'✅');
+  document.getElementById('bc-title').textContent = m.title;
+  document.getElementById('bc-body').textContent = m.body;
+  document.getElementById('bc-overlay').classList.add('on');
+  document.getElementById('bc-overlay').dataset.mid = m.id;
+}
+function dismissBroadcast(){
+  const mid = document.getElementById('bc-overlay').dataset.mid;
+  if(mid){
+    if(!seenMsgs.includes(mid)) seenMsgs.push(mid);
+    lsSet('berlin_seen', seenMsgs);
+  }
+  document.getElementById('bc-overlay').classList.remove('on');
+  broadcastQueue = broadcastQueue.filter(m=>m.id!==mid);
+  if(broadcastQueue.length) setTimeout(showNextBroadcast,300);
+}
+function dismissAllBroadcasts(){
+  seenMsgs = messages.map(m=>m.id);
+  lsSet('berlin_seen', seenMsgs);
+  broadcastQueue = [];
+  document.getElementById('bc-overlay').classList.remove('on');
+}
+
+// ==================== SHARE SHEET ====================
+function openShareSheet(){
+  currentSheetType='share';
+  document.getElementById('sheet-title').textContent='שיתוף וייצוא';
+
+  const url = window.location.href;
+  const isArtifact = /claude\.ai|anthropic|artifact/i.test(url) || url.startsWith('blob:') || url.startsWith('about:');
+
+  const artifactWarning = isArtifact ? `
+    <div style="background:var(--amber-l);border:1px solid var(--amber);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.5;color:#7a5600">
+      <strong>⚠️ הקישור של האפליקציה הזו אישי</strong> — לשיתוף עם חברי המשלחת, השתמש ב<strong>"הורד את האפליקציה (HTML)"</strong> למטה ושלח את הקובץ.
+    </div>` : '';
+
+  document.getElementById('sheet-body').innerHTML = `
+    ${artifactWarning}
+    <p style="color:var(--g600);font-size:13px;margin-bottom:14px">שתף עם חברי המשלחת או ייצא את התוכן לשימוש אישי.</p>
+
+    <div style="font-size:12px;font-weight:700;color:var(--g600);margin:8px 0 8px 2px">📤 שיתוף הקישור${isArtifact?' (אישי)':''}</div>
+    <div class="share-opt wa" onclick="shareVia('whatsapp')">
+      <span class="ic">💬</span><div>WhatsApp</div>
+    </div>
+    <div class="share-opt tg" onclick="shareVia('native')">
+      <span class="ic">📲</span><div>שתף...</div>
+    </div>
+    <div class="share-opt mail" onclick="shareVia('email')">
+      <span class="ic">📧</span><div>אימייל</div>
+    </div>
+    <div class="share-opt copy" onclick="shareVia('copy')">
+      <span class="ic">📋</span><div>העתק קישור</div>
+    </div>
+
+    <div style="font-size:12px;font-weight:700;color:var(--g600);margin:18px 0 8px 2px">💾 ייצוא תוכן${isArtifact?' (מומלץ לשיתוף)':''}</div>
+    <div class="share-opt" onclick="exportStandaloneHTML()" style="${isArtifact?'border:2px solid var(--blue);background:var(--blue-l)':''}">
+      <span class="ic" style="background:var(--blue-l);color:var(--blue)">🌐</span>
+      <div><div>הורד את האפליקציה (HTML)</div><div style="font-size:12px;color:var(--g600);font-weight:400">קובץ שעובד במצב אופליין — שלח אותו כקובץ מצורף</div></div>
+    </div>
+    <div class="share-opt" onclick="exportScheduleText()">
+      <span class="ic" style="background:var(--amber-l);color:var(--amber)">📄</span>
+      <div><div>הורד לו"ז כטקסט</div><div style="font-size:12px;color:var(--g600);font-weight:400">.txt — לשיתוף ב-WhatsApp או אימייל</div></div>
+    </div>
+    <div class="share-opt" onclick="shareScheduleWhatsApp()">
+      <span class="ic" style="background:#25d36620;color:#25d366">📅</span>
+      <div><div>שלח לו"ז ב-WhatsApp</div><div style="font-size:12px;color:var(--g600);font-weight:400">גרסה קצרה מעוצבת</div></div>
+    </div>
+    <div class="share-opt" onclick="printSchedule()">
+      <span class="ic" style="background:var(--g100);color:var(--g900)">🖨️</span>
+      <div><div>הדפס / שמור PDF</div><div style="font-size:12px;color:var(--g600);font-weight:400">לו"ז מלא להדפסה</div></div>
+    </div>
+    <div class="share-opt" onclick="exportBackup();closeSheet();">
+      <span class="ic" style="background:var(--purple-l);color:var(--purple)">💾</span>
+      <div><div>גיבוי JSON</div><div style="font-size:12px;color:var(--g600);font-weight:400">לשחזור מלא של כל הנתונים</div></div>
+    </div>
+  `;
+  document.getElementById('sheet-actions').style.display='none';
+  openSheet();
+}
+function shareVia(kind){
+  const url = window.location.href;
+  const isArtifact = /claude\.ai|anthropic|artifact/i.test(url) || url.startsWith('blob:') || url.startsWith('about:');
+  const text = 'אפליקציית משלחת ברלין 2026 🇩🇪✈️';
+  const full = text+'\n\n'+url;
+
+  // If we're inside a Claude artifact sandbox, the URL isn't shareable externally.
+  // Offer the offline HTML export instead, which actually works.
+  if(isArtifact && (kind==='whatsapp' || kind==='email' || kind==='native')){
+    closeSheet();
+    showArtifactShareHelp(kind);
+    return;
+  }
+
+  if(kind==='whatsapp'){
+    window.open('https://wa.me/?text='+encodeURIComponent(full),'_blank');
+  } else if(kind==='native'){
+    if(navigator.share){
+      navigator.share({title:'משלחת ברלין 2026',text,url}).catch(()=>{});
+    } else {
+      navigator.clipboard.writeText(url).then(()=>toast('✅ הקישור הועתק'));
+    }
+  } else if(kind==='email'){
+    window.location.href='mailto:?subject='+encodeURIComponent('משלחת ברלין 2026')+'&body='+encodeURIComponent(full);
+  } else if(kind==='copy'){
+    navigator.clipboard.writeText(url).then(()=>{
+      if(isArtifact){
+        toast('⚠️ הקישור הועתק אך יעבוד רק בדפדפן שלך');
+      } else {
+        toast('✅ הקישור הועתק');
+      }
+    });
+  }
+  closeSheet();
+}
+
+function showArtifactShareHelp(kind){
+  currentSheetType='artifactHelp';
+  document.getElementById('sheet-title').textContent='שיתוף עם חברי המשלחת';
+  document.getElementById('sheet-body').innerHTML = `
+    <div style="background:var(--amber-l);border:1px solid var(--amber);border-radius:10px;padding:14px;margin-bottom:14px;font-size:13px;line-height:1.6;color:#7a5600">
+      <strong>⚠️ הקישור של האפליקציה לא ניתן לשיתוף חיצוני</strong><br>
+      האפליקציה רצה בסביבה של Claude — רק לך יש גישה. כדי לשתף עם חברי המשלחת, יש שתי אפשרויות:
+    </div>
+
+    <div style="font-weight:700;font-size:14px;margin:14px 0 8px 2px">✅ אפשרות 1: שלח את הקובץ עצמו</div>
+    <div class="share-opt" onclick="exportAndShare('${kind}')">
+      <span class="ic" style="background:var(--blue-l);color:var(--blue)">📎</span>
+      <div>
+        <div>הורד HTML ושתף כקובץ</div>
+        <div style="font-size:12px;color:var(--g600);font-weight:400">הקובץ יורד למכשיר, ואז ניתן לשלוח אותו ב-WhatsApp/מייל כקובץ מצורף</div>
+      </div>
+    </div>
+
+    <div style="font-weight:700;font-size:14px;margin:14px 0 8px 2px">📄 אפשרות 2: שלח רק את התוכן</div>
+    <div class="share-opt wa" onclick="shareScheduleWhatsApp()">
+      <span class="ic">📅</span>
+      <div>
+        <div>שלח לו"ז ב-WhatsApp</div>
+        <div style="font-size:12px;color:var(--g600);font-weight:400">טקסט מעוצב בלבד</div>
+      </div>
+    </div>
+
+    <div style="background:var(--blue-l);border:1px solid var(--blue);border-radius:10px;padding:12px;margin-top:14px;font-size:12px;line-height:1.6;color:var(--blue-d)">
+      <strong>💡 לשיתוף עם סנכרון אמיתי</strong> (כולם רואים עדכונים חיים) — צריך להעלות את הקובץ לשירות אירוח כמו GitHub Pages או Netlify. בקש ממני עזרה בזה.
+    </div>
+  `;
+  document.getElementById('sheet-actions').style.display='none';
+  openSheet();
+}
+
+async function exportAndShare(kind){
+  closeSheet();
+  await exportStandaloneHTML();
+  setTimeout(()=>{
+    toast('📎 הקובץ הורד — שלח אותו כקובץ מצורף');
+  }, 600);
+}
+
+// ========== EXPORT FUNCTIONS ==========
+function buildScheduleText(emoji){
+  const dayEmojis = emoji ? {sun:'🌅',mon:'🗓️',tue:'🗓️',wed:'🗓️',thu:'✈️'} : {};
+  let txt = '🇩🇪 משלחת ברלין 2026\n📅 26–30 באפריל 2026\n';
+  txt += '─────────────────\n\n';
+  dayKeys.forEach(k=>{
+    const d = schedule[k];
+    if(!d) return;
+    txt += `${dayEmojis[k]||'📌'} *${d.label}*`;
+    if(d.dress) txt += ` — ${d.dress.text}`;
+    txt += '\n';
+    if(d.hotel) txt += `🏨 ${d.hotel.name} (${d.hotel.dates})\n`;
+    d.events.forEach(e=>{
+      txt += `  ${e.time}  ${e.title}`;
+      if(e.loc) txt += `\n       📍 ${e.loc}`;
+      if(e.detail) txt += `\n       ${e.detail}`;
+      txt += '\n';
+    });
+    txt += '\n';
+  });
+  txt += '─────────────────\n';
+  txt += '☎️ חירום: משטרת ברלין 110 | אמבולנס 112\n';
+  return txt;
+}
+
+function exportScheduleText(){
+  const txt = buildScheduleText(true);
+  const blob = new Blob([txt],{type:'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'berlin2026_schedule.txt';
+  a.click();
+  closeSheet();
+  toast('✅ קובץ הלו"ז הורד');
+}
+
+function shareScheduleWhatsApp(){
+  const txt = buildScheduleText(true);
+  if(txt.length > 30000){
+    // WhatsApp URL has limits; fallback to copy
+    navigator.clipboard.writeText(txt).then(()=>toast('📋 הלו"ז הועתק — הדבק ב-WhatsApp'));
+  } else {
+    window.open('https://wa.me/?text='+encodeURIComponent(txt),'_blank');
+  }
+  closeSheet();
+}
+
+function printSchedule(){
+  // Build a full printable schedule page
+  let html = `<div class="report-wrap"><div class="report-hdr">
+    <div class="logo">🇩🇪✈️</div>
+    <h2>לו"ז משלחת ברלין 2026</h2>
+    <div class="sub">26–30 באפריל 2026</div>
+  </div>`;
+  dayKeys.forEach(k=>{
+    const d = schedule[k];
+    if(!d) return;
+    html += `<div class="report-day"><h3>${escHtml(d.label)}`;
+    if(d.dress) html += ` · ${escHtml(d.dress.text)}`;
+    html += `</h3>`;
+    if(d.hotel){
+      html += `<div style="background:var(--blue-l);padding:8px 12px;border-radius:8px;margin-bottom:8px;font-size:13px"><strong>🏨 ${escHtml(d.hotel.name)}</strong> — ${escHtml(d.hotel.dates)}</div>`;
+    }
+    d.events.forEach(e=>{
+      html += `<div class="report-ref" style="display:flex;gap:10px;align-items:flex-start">
+        <div style="background:var(--blue);color:#fff;padding:4px 10px;border-radius:6px;font-weight:700;font-size:13px;min-width:56px;text-align:center">${escHtml(e.time)}</div>
+        <div style="flex:1">
+          <div style="font-weight:600;font-size:14px">${escHtml(e.title)}</div>
+          ${e.detail?`<div style="font-size:12px;color:var(--g600);margin-top:2px">${escHtml(e.detail)}</div>`:''}
+          ${e.loc?`<div style="font-size:12px;color:var(--blue);margin-top:2px">📍 ${escHtml(e.loc)}</div>`:''}
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  });
+  html += `<div style="text-align:center;margin-top:20px;padding-top:14px;border-top:1px solid var(--g200);font-size:12px;color:var(--g600)">
+    ☎️ משטרת ברלין: 110  ·  אמבולנס: 112
+  </div>`;
+  html += `<div style="text-align:center;margin-top:18px" class="no-print">
+    <button class="btn btn-primary" onclick="window.print()">🖨️ הדפס / שמור PDF</button>
+    <button class="btn btn-ghost" style="margin-right:6px" onclick="closeReport()">סגור</button>
+  </div></div>`;
+  const rp = document.getElementById('report-page');
+  rp.innerHTML = html;
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+  rp.classList.add('on');
+  rp.style.display='block';
+  window.scrollTo(0,0);
+  closeSheet();
+}
+
+async function exportStandaloneHTML(){
+  try{
+    // Build a standalone copy from the current DOM.
+    // This approach works in sandboxed artifact environments where fetch() may be blocked.
+    const htmlEl = document.documentElement.cloneNode(true);
+
+    // Remove any dynamic state from the clone (overlays, countdown, etc.)
+    htmlEl.querySelectorAll('.sheet-overlay, .sheet, .bc-overlay, .cd-overlay').forEach(el=>{
+      el.classList.remove('on');
+    });
+    // Clear file inputs which can't serialize
+    htmlEl.querySelectorAll('input[type="file"]').forEach(el=>{ el.value=''; });
+    // Reset pages to default (home visible)
+    htmlEl.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+    const homeClone = htmlEl.querySelector('#page-home');
+    if(homeClone) homeClone.classList.add('on');
+
+    // Inject preloaded data script before the main DATA script.
+    // IMPORTANT: script tag literals in strings must be split so the HTML
+    // parser doesn't end the current script block prematurely.
+    const preloadScript = '<scr'+'ipt>\n' +
+      'window.__BERLIN_PRELOAD__ = ' +
+      JSON.stringify({
+        schedule: schedule,
+        messages: messages,
+        offline: true,
+        exportedAt: new Date().toISOString()
+      }).replace(/</g,'\\u003c') + ';\n' +
+      '</scr'+'ipt>';
+
+    let outerHTML = htmlEl.outerHTML;
+    // Inject preload before the first inline script
+    const dataScriptRe = new RegExp('<scr'+'ipt>\\s*\\/\\/\\s*====+\\s*DATA\\s*====+');
+    outerHTML = outerHTML.replace(dataScriptRe,
+      preloadScript + '\n<scr'+'ipt>\n// ==================== DATA ====================');
+
+    // If the injection pattern wasn't found (minified?), inject before </body>
+    if(!outerHTML.includes('__BERLIN_PRELOAD__')){
+      outerHTML = outerHTML.replace('</body>', preloadScript + '\n</body>');
+    }
+
+    const full = '<!DOCTYPE html>\n' + outerHTML;
+    const blob = new Blob([full],{type:'text/html;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'berlin2026_offline.html';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Release the object URL after a moment
+    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+    closeSheet();
+    toast('✅ גרסת HTML אופליין הורדה');
+  } catch(e) {
+    console.error('Export failed:', e);
+    toast('❌ שגיאה בייצוא: '+(e.message||''),'err');
+  }
+}
+
+// ==================== INIT ====================
+async function init(){
+  loadLocal();
+  // If running as offline copy, skip cloud loading
+  if(isOfflineCopy){
+    renderSchedule();
+    renderHome();
+    renderRefDays();
+    renderReflections();
+    updateSyncPill(false);
+    startLocation();
+    loadWeather(); // will try to fetch; if offline will show cached or error gracefully
+    // Show a banner
+    const banner = document.createElement('div');
+    banner.style.cssText='background:var(--amber-l);color:var(--amber);border-bottom:1px solid var(--amber);padding:8px 14px;text-align:center;font-size:12px;font-weight:600;position:sticky;top:60px;z-index:45';
+    banner.innerHTML = '📴 מצב אופליין — ללא סנכרון ענן';
+    document.querySelector('.hdr').insertAdjacentElement('afterend',banner);
+    return;
+  }
+  // Render initial schedule (from defaults / local fallback)
+  renderSchedule();
+  renderHome();
+  renderRefDays();
+  renderReflections();
+  // Load from cloud (authoritative), then re-render
+  await loadFromCloud();
+  renderSchedule();
+  renderHome();
+  // Cache to local
+  lsSet('berlin_schedule', schedule);
+  lsSet('berlin_msgs', messages);
+  // Check broadcasts
+  checkBroadcasts();
+  // Load weather forecast in background
+  loadWeather();
+  // Start location watch in background
+  startLocation();
+  // Poll cloud every 60s for updates (skip in offline mode)
+  if(!isOfflineCopy){
+    setInterval(async ()=>{
+      const prevMsgIds = new Set(messages.map(m=>m.id));
+      await loadFromCloud();
+      // refresh views if visible
+      if(document.getElementById('page-schedule').classList.contains('on')) renderSchedule();
+      if(document.getElementById('page-home').classList.contains('on')) renderHome();
+      // Check if there are genuinely new messages (not just reloaded old ones)
+      const newOnes = messages.filter(m=>!prevMsgIds.has(m.id));
+      if(newOnes.length && !document.getElementById('bc-overlay').classList.contains('on')){
+        checkBroadcasts();
+      }
+      if(document.getElementById('page-admin').classList.contains('on')) renderMsgHistory();
+    }, 60000);
+  }
+
+  // Recovery: when returning to the app from an external app (phone, WhatsApp, maps),
+  // make sure we have a visible page and nothing is stuck in a half-state.
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.hidden) return;
+    // Close any lingering countdown overlay
+    if(document.getElementById('cd-overlay').classList.contains('on')){
+      if(countdownInt){ clearInterval(countdownInt); countdownInt=null; }
+      document.getElementById('cd-overlay').classList.remove('on');
+    }
+    // Ensure at least one page is active
+    const anyActive = document.querySelector('.page.on');
+    if(!anyActive){
+      goPage('home');
+    }
+  });
+
+  // Safety net: intercept any <a href="tel:..."> clicks that might have slipped
+  // through and route them via safeCall so the iframe doesn't navigate to tel:
+  document.addEventListener('click', (e)=>{
+    const a = e.target.closest('a[href]');
+    if(!a) return;
+    const href = a.getAttribute('href') || '';
+    if(href.startsWith('tel:')){
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      safeCall(href.slice(4));
+      return false;
+    }
+  }, true); // use capture phase so we run first
+
+  // Also proactively convert any existing tel: links in the DOM to safe onclick handlers
+  function sanitizeTelLinks(){
+    document.querySelectorAll('a[href^="tel:"]').forEach(a=>{
+      const num = a.getAttribute('href').slice(4);
+      a.removeAttribute('href');
+      a.style.cursor = 'pointer';
+      a.onclick = (e)=>{ e.preventDefault(); safeCall(num); return false; };
+    });
+  }
+  sanitizeTelLinks();
+  // Run again after any DOM updates (Modal content, etc.) — MutationObserver is lightweight
+  const mo = new MutationObserver(()=>sanitizeTelLinks());
+  mo.observe(document.body, {childList:true, subtree:true});
+
+  // Final safety net: if a page becomes totally broken (all pages hidden),
+  // auto-recover to home. Runs on any hash change or history event.
+  window.addEventListener('hashchange', ()=>{
+    const anyActive = document.querySelector('.page.on');
+    if(!anyActive) goPage('home');
+  });
+  window.addEventListener('popstate', ()=>{
+    const anyActive = document.querySelector('.page.on');
+    if(!anyActive) goPage('home');
+  });
+  window.addEventListener('pageshow', ()=>{
+    const anyActive = document.querySelector('.page.on');
+    if(!anyActive) goPage('home');
+  });
+}
+init();
+</script>
+
+
+</body></html>
