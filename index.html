@@ -1,299 +1,13 @@
 <!DOCTYPE html>
-<html lang="he" dir="rtl"><head>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-    <script>
-      (function() {
-        const originalConsole = window.console;
-        window.console = {
-          log: (...args) => {
-            originalConsole.log(...args);
-            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
-          },
-          error: (...args) => {
-            originalConsole.error(...args);
-            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
-          },
-          warn: (...args) => {
-            originalConsole.warn(...args);
-            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
-          }
-        };
-
-        let requestId = 0;
-        let callbacksMap = new Map();
-        let streamControllers = new Map();
-        
-        window.claude = {
-          complete: (prompt) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
-            });
-          }
-        };
-
-        window.storage = {
-          get: (key, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageGet', id, key, shared }, '*');
-            });
-          },
-          set: (key, value, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageSet', id, key, value, shared }, '*');
-            });
-          },
-          delete: (key, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageDelete', id, key, shared }, '*');
-            });
-          },
-          list: (prefix, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageList', id, prefix, shared }, '*');
-            });
-          }
-        };
-
-        let pendingBlobs = new Map();
-        URL.createObjectURL = (blob) => {
-          // Store the blob and create an ID and URL for it
-          const blobId = `blob-${Date.now()}-${Math.random()}`;
-          pendingBlobs.set(blobId, blob);
-          return `blob-request://${blobId}`;
-        };
-
-        URL.revokeObjectURL = (url) => {
-          // Remove the blob from our store
-          const blobId = url.replace("blob-request://", "");
-          pendingBlobs.delete(blobId);
-        };
-
-        const getBlobFromURL = (url) => {
-          const blobId = url.replace("blob-request://", "");
-          return pendingBlobs.get(blobId);
-        };
-
-        // Override global fetch with streaming support
-        window.fetch = (url, init = {}) => {
-          return new Promise((resolve, reject) => {
-            const id = requestId++;
-            const channelId = `fetch-${id}-${Date.now()}`;
-            
-            callbacksMap.set(id, { 
-              resolve: (response) => {
-                // Create a ReadableStream for the response body
-                const stream = new ReadableStream({
-                  start(controller) {
-                    streamControllers.set(channelId, controller);
-                  },
-                  cancel() {
-                    streamControllers.delete(channelId);
-                  }
-                });
-                
-                // Create and return the Response with the stream
-                resolve(new Response(stream, {
-                  status: response.status,
-                  statusText: response.statusText,
-                  headers: response.headers
-                }));
-              },
-              reject,
-              channelId
-            });
-            
-            window.parent.postMessage({
-              type: 'proxyFetch',
-              id,
-              url,
-              init,
-              channelId
-            }, '*');
-          });
-        };
-
-        window.addEventListener('message', async (event) => {
-          if (event.data.type === 'takeScreenshot') {
-            const rootElement = document.getElementById('artifacts-component-root-html');
-            if (!rootElement) {
-              window.parent.postMessage({
-                type: 'screenshotError',
-                error: new Error('Root element not found'),
-              }, '*');
-            }
-            const screenshot = await htmlToImage.toPng(rootElement, {
-              imagePlaceholder:
-                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
-            });
-            window.parent.postMessage({
-              type: 'screenshotData',
-              data: screenshot,
-            }, '*');
-          } else if (event.data.type === 'claudeComplete') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.completion);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'proxyFetchResponse') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-              callbacksMap.delete(event.data.id);
-            } else {
-              // Initial response with headers, status, etc.
-              callback.resolve({
-                status: event.data.status,
-                statusText: event.data.statusText,
-                headers: event.data.headers
-              });
-              // Don't delete the callback yet if streaming
-              if (!event.data.body) {
-                callbacksMap.delete(event.data.id);
-              }
-            }
-          } else if (event.data.type === 'proxyFetchStream') {
-            // Handle streaming data chunks
-            const controller = streamControllers.get(event.data.channelId);
-            if (controller) {
-              if (event.data.error) {
-                controller.error(new Error(event.data.error));
-                streamControllers.delete(event.data.channelId);
-              } else if (event.data.done) {
-                controller.close();
-                streamControllers.delete(event.data.channelId);
-                // Clean up the callback
-                const callback = Array.from(callbacksMap.entries()).find(
-                  ([_, value]) => value.channelId === event.data.channelId
-                );
-                if (callback) {
-                  callbacksMap.delete(callback[0]);
-                }
-              } else if (event.data.chunk) {
-                controller.enqueue(new Uint8Array(event.data.chunk));
-              }
-            }
-          } else if (event.data.type === 'storageGet') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageSet') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageDelete') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageList') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          }
-        });
-
-        window.addEventListener('click', (event) => {
-          const isEl = event.target instanceof HTMLElement;
-          if (!isEl) return;
-    
-          // find ancestor links
-          const linkEl = event.target.closest("a");
-          if (!linkEl || !linkEl.href) return;
-    
-          event.preventDefault();
-          event.stopImmediatePropagation();
-    
-          if (linkEl.href.startsWith("blob-request:")) {
-            const blob = getBlobFromURL(linkEl.href);
-            if (!blob) return;
-            void blob.arrayBuffer().then((data) => {
-              window.parent.postMessage({
-                type: "downloadFile",
-                filename: linkEl.download,
-                data,
-                mimeType: blob.type || "application/octet-stream",
-              });
-            });
-          } else if (linkEl.href.startsWith("data:")) {
-            const [header, base64Data] = linkEl.href.split(",");
-            const mimeMatch = header.match(/data:([^;]+)/);
-            const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
-            const binaryString = atob(base64Data);
-            const data = Uint8Array.from(binaryString, (c) =>
-              c.charCodeAt(0),
-            ).buffer;
-            window.parent.postMessage({
-              type: "downloadFile",
-              filename: linkEl.download,
-              data,
-              mimeType,
-            });
-          } else {
-            let linkUrl;
-            try {
-              linkUrl = new URL(linkEl.href);
-            } catch (error) {
-              return;
-            }
-    
-            if (linkUrl.hostname === window.location.hostname) return;
-      
-            window.parent.postMessage({
-              type: 'openExternal',
-              href: linkEl.href,
-            }, '*');
-          }
-      });
-
-        const originalOpen = window.open;
-        window.open = function (url) {
-          window.parent.postMessage({
-            type: "openExternal",
-            href: url,
-          }, "*");
-        };
-
-        window.addEventListener('error', (event) => {
-          window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*');
-        });
-      })();
-    </script>
-  
+<html lang="he" dir="rtl">
+<head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="theme-color" content="#1a5fa5">
 <title>משלחת ברלין 2026</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
-<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&amp;display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root{
   --blue:#1a5fa5; --blue-l:#e6f1fb; --blue-d:#0c447c; --blue-m:#2a7acc;
@@ -408,7 +122,7 @@ textarea{resize:vertical;min-height:80px}
 .ev-card .title{flex:1;font-weight:600;font-size:15px;line-height:1.3;color:var(--g900)}
 .ev-card .edit-btn{width:30px;height:30px;border-radius:8px;background:var(--g50);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
 .ev-card .detail{font-size:13px;color:var(--g600);margin:4px 0 6px 0;line-height:1.4}
-.ev-card .map-link{display:inline-flex;align-items:center;gap:4px;background:var(--blue-l);color:var(--blue-d);padding:5px 10px;border-radius:6px;font-size:12px;font-weight:600;margin-left:6px}
+.ev-card .map-link{display:inline-flex;align-items:center;gap:4px;background:var(--blue-l);color:var(--blue-d);padding:5px 10px;border-radius:6px;font-size:12px;font-weight:600;margin-left:6px;position:relative;z-index:2;text-decoration:none}
 .ev-files{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .file-chip{display:inline-flex;align-items:center;gap:4px;background:var(--blue-l);color:var(--blue-d);padding:5px 10px;border-radius:6px;font-size:12px;font-weight:500;border:1px solid var(--blue)}
 .file-chip .sz{color:var(--g600);font-size:11px;font-weight:400}
@@ -613,7 +327,7 @@ textarea{resize:vertical;min-height:80px}
 }
 </style>
 </head>
-<body id="artifacts-component-root-html" style="overflow: hidden;">
+<body>
 
 <!-- HEADER -->
 <header class="hdr">
@@ -626,7 +340,7 @@ textarea{resize:vertical;min-height:80px}
   </div>
   <div class="hdr-actions">
     <button class="hdr-btn" onclick="openShareSheet()" title="שיתוף">
-      <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"></path></svg>
+      <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/></svg>
     </button>
     <button class="hdr-btn sos-hdr" onclick="goPage('sos')">SOS</button>
   </div>
@@ -638,39 +352,10 @@ textarea{resize:vertical;min-height:80px}
     <div class="hero-flag">🇩🇪</div>
     <div class="hero-title">משלחת ברלין 2026</div>
     <div class="hero-dates">26–30 באפריל 2026</div>
-    <div class="hero-greet" id="greet">🌤️ צהריים טובים</div>
+    <div class="hero-greet" id="greet">שלום</div>
   </div>
 
-  <div id="weather-widget" class="weather-widget" style="display: block;">
-    <div class="wh">
-      <div class="wh-title">🌤️ תחזית מזג אוויר</div>
-      <div class="wh-loc" style="font-size:10px">📊 ממוצע עונתי לברלין · סוף אפריל</div>
-    </div>
-    <div class="w-grid">
-      
-        <div class="w-day">
-          <div class="dn">היום</div>
-          <div class="wi">⛅</div>
-          <div class="wt">15°<span class="lo">/6°</span></div>
-          <div class="wd">מעונן חלקית</div>
-        </div>
-      
-        <div class="w-day">
-          <div class="dn">מחר</div>
-          <div class="wi">🌤️</div>
-          <div class="wt">17°<span class="lo">/7°</span></div>
-          <div class="wd">בהיר בעיקר</div>
-        </div>
-      
-        <div class="w-day">
-          <div class="dn">א׳ 26/4</div>
-          <div class="wi">🌦️</div>
-          <div class="wt">14°<span class="lo">/5°</span></div>
-          <div class="wd">טפטוף אפשרי<br>☔ 40%</div>
-        </div>
-      
-    </div>
-  </div>
+  <div id="weather-widget" class="weather-widget" style="display:none"></div>
 
   <div id="today-strip" class="today-strip" style="display:none"></div>
 
@@ -703,224 +388,8 @@ textarea{resize:vertical;min-height:80px}
 
 <!-- SCHEDULE PAGE -->
 <section id="page-schedule" class="page">
-  <div class="tabs" id="day-tabs"><button class="tab on" onclick="selectDay('sun')">ראשון 26/4</button><button class="tab" onclick="selectDay('mon')">שני 27/4</button><button class="tab" onclick="selectDay('tue')">שלישי 28/4</button><button class="tab" onclick="selectDay('wed')">רביעי 29/4</button><button class="tab" onclick="selectDay('thu')">חמישי 30/4</button></div>
-  <div id="days-container"><div class="day-block on" id="day-sun"><div class="dress-badge casual">👕 לבוש נוח · 👕 חולצה ומכנסיים ספורטיביים</div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">03:30</div>
-      <div class="title">כינוס נתב"ג<a class="map-link" href="https://www.google.com/maps/search/Ben%20Gurion%20Airport%20Terminal%203%20Israel" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('sun','s1')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">טרמינל 3, מול דלפק מודיעין</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">06:20</div>
-      <div class="title">המראה לברלין<a class="map-link" href="https://www.google.com/maps/search/Ben%20Gurion%20Airport%20Terminal%203%20Israel" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('sun','s2')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">אל על LY2371</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">09:35</div>
-      <div class="title">נחיתה בברלין<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Brandenburg%20Airport%20BER%20Terminal%201" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('sun','s3')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">⚠️ לא להתקדם עצמאית — להמתין ביציאה מהשרוול</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">10:30</div>
-      <div class="title">יציאה מהטרמינל<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Brandenburg%20Airport%20BER" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('sun','s4')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">אוטובוס ממתין</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">17:00</div>
-      <div class="title">הגעה למלון RIU Plaza Berlin<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('sun','s5')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">כניסה לחדרים</div>
-    
-  </div></div><div class="day-block" id="day-mon"><div class="hotel-card"><div><div class="n">🏨 RIU Plaza Berlin</div><div class="d">לינה 26.4–30.4</div></div><a class="mp" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div><div class="dress-badge formal">👔 חליפה ללא עניבה · 👔 לבוש רשמי</div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">09:00</div>
-      <div class="title">יציאה מהמלון<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('mon','m1')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">רכבת קלה, כרטיס חופשי יחולק</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">10:00</div>
-      <div class="title">פגישה עם מפכ"לית ברלין + האקדמיה המשטרתית<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Police%20Headquarters%20Tempelhof" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('mon','m2')" title="ערוך">✏️</button>
-    </div>
-    
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">12:00</div>
-      <div class="title">זמן חופשי במרכז העיר<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Mitte%20city%20center" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('mon','m3')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">עד 14:00</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">14:00</div>
-      <div class="title">פגישה — Command 11<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Police%20Command%20Center%2011" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('mon','m4')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">מרכז פיקוד משטרתי</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">17:00</div>
-      <div class="title">חזרה למלון — ערב חופשי<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('mon','m5')" title="ערוך">✏️</button>
-    </div>
-    
-    
-  </div></div><div class="day-block" id="day-tue"><div class="hotel-card"><div><div class="n">🏨 RIU Plaza Berlin</div><div class="d">לינה 26.4–30.4</div></div><a class="mp" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div><div class="dress-badge formal">👔 חליפה ללא עניבה · 👔 לבוש רשמי</div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">09:00</div>
-      <div class="title">יציאה בתחב"צ לפרלמנט<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('tue','t1')" title="ערוך">✏️</button>
-    </div>
-    
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">10:00</div>
-      <div class="title">פגישה עם חבר פרלמנט<a class="map-link" href="https://www.google.com/maps/search/Bundestag%20Reichstag%20Building%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('tue','t2')" title="ערוך">✏️</button>
-    </div>
-    
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">12:00</div>
-      <div class="title">סיום בפרלמנט — נסיעה לאוניברסיטה<a class="map-link" href="https://www.google.com/maps/search/Bundestag%20Reichstag%20Building%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('tue','t3')" title="ערוך">✏️</button>
-    </div>
-    
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">14:00</div>
-      <div class="title">פעילות באוניברסיטה<a class="map-link" href="https://www.google.com/maps/search/HWR%20Berlin%20Hochschule%20f%C3%BCr%20Wirtschaft%20und%20Recht" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('tue','t4')" title="ערוך">✏️</button>
-    </div>
-    
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">17:00</div>
-      <div class="title">חזרה למלון — זמן חופשי<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('tue','t5')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">עד 19:00</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">19:00</div>
-      <div class="title">ערב מפקד — מלון קינג דייויד<a class="map-link" href="https://www.google.com/maps/search/Hotel%20Palace%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('tue','t6')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">יציאה במוניות, סיום משוער 23:00</div>
-    
-  </div></div><div class="day-block" id="day-wed"><div class="hotel-card"><div><div class="n">🏨 RIU Plaza Berlin</div><div class="d">לינה 26.4–30.4</div></div><a class="mp" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div><div class="dress-badge formal">👔 חליפה ללא עניבה · 👔 לבוש רשמי</div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">09:00</div>
-      <div class="title">יציאה בתחב"צ — פעילות בפרלמנט<a class="map-link" href="https://www.google.com/maps/search/Bundestag%20Reichstag%20Building%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('wed','w1')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">סיור + פגישות</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">13:00</div>
-      <div class="title">נסיעה ל-Rola Solutions<a class="map-link" href="https://www.google.com/maps/search/Rola%20Solutions%20GmbH%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('wed','w2')" title="ערוך">✏️</button>
-    </div>
-    
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">14:00</div>
-      <div class="title">פגישה עם נציגי Rola Solutions<a class="map-link" href="https://www.google.com/maps/search/Rola%20Solutions%20GmbH%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('wed','w3')" title="ערוך">✏️</button>
-    </div>
-    
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">16:00</div>
-      <div class="title">סיום — זמן חופשי</div>
-      <button class="edit-btn" onclick="openEventEditor('wed','w4')" title="ערוך">✏️</button>
-    </div>
-    
-    
-  </div></div><div class="day-block" id="day-thu"><div class="dress-badge casual">👕 לבוש נוח · 👕 אך התחשבו באופי המקום</div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">08:00</div>
-      <div class="title">פינוי חדרים<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('thu','h1')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">טסים: מזוודות לאוטובוס. נשארים: שמירת חפצים במלון</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">09:00</div>
-      <div class="title">יציאה לוילה ואנזה<a class="map-link" href="https://www.google.com/maps/search/RIU%20Plaza%20Berlin%20Hotel%20Germany" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('thu','h2')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">אוטובוס צמוד כל היום</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">10:00</div>
-      <div class="title">פעילות בוילה ואנזה<a class="map-link" href="https://www.google.com/maps/search/Wannsee%20Conference%20House%20Villa%20Berlin" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('thu','h3')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">סדנת "בירוקרטים" — תפקיד הפקידים ביישום הפתרון הסופי</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">15:00</div>
-      <div class="title">סיום</div>
-      <button class="edit-btn" onclick="openEventEditor('thu','h4')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">טסים: קניון סמוך לשדה. נשארים: חופשי</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">20:55</div>
-      <div class="title">טיסה לסופיה<a class="map-link" href="https://www.google.com/maps/search/Berlin%20Brandenburg%20Airport%20BER" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('thu','h5')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">Ryanair</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">00:10</div>
-      <div class="title">נחיתה בסופיה (שישי)<a class="map-link" href="https://www.google.com/maps/search/Sofia%20Airport%20Bulgaria" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('thu','h6')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">שאטל למלון</div>
-    
-  </div><div class="ev-card">
-    <div class="top-row">
-      <div class="time">11:05</div>
-      <div class="title">המראה מסופיה (שישי)<a class="map-link" href="https://www.google.com/maps/search/Sofia%20Airport%20Bulgaria" target="_blank" rel="noopener">📍 מפה</a></div>
-      <button class="edit-btn" onclick="openEventEditor('thu','h7')" title="ערוך">✏️</button>
-    </div>
-    <div class="detail">אל על LY552</div>
-    
-  </div></div></div>
+  <div class="tabs" id="day-tabs"></div>
+  <div id="days-container"></div>
 </section>
 
 <!-- SECURITY PAGE -->
@@ -1046,7 +515,7 @@ textarea{resize:vertical;min-height:80px}
   <div class="ref-form">
     <div class="field">
       <label for="ref-day">בחר יום</label>
-      <select id="ref-day"><option value="sun">ראשון 26/4</option><option value="mon">שני 27/4</option><option value="tue">שלישי 28/4</option><option value="wed">רביעי 29/4</option><option value="thu">חמישי 30/4</option></select>
+      <select id="ref-day"></select>
     </div>
     <div class="field">
       <label for="ref-text">הרפלקציה שלי</label>
@@ -1063,7 +532,7 @@ textarea{resize:vertical;min-height:80px}
         </button>
       </div>
       <input type="file" id="ref-camera" accept="image/*" capture="environment" style="display:none">
-      <input type="file" id="ref-imgs" accept="image/*" multiple="" style="display:none">
+      <input type="file" id="ref-imgs" accept="image/*" multiple style="display:none">
       <div id="ref-img-preview" class="img-grid"></div>
     </div>
     <button class="btn btn-primary btn-full" onclick="saveReflection()">💾 שמור רפלקציה</button>
@@ -1071,7 +540,7 @@ textarea{resize:vertical;min-height:80px}
 
   <div id="ref-list">
     <h2 class="section-title">📔 הרפלקציות שלי</h2>
-    <div id="ref-cards"><div style="color:var(--g600);font-size:13px;text-align:center;padding:14px">עדיין לא שמרת רפלקציות</div></div>
+    <div id="ref-cards"></div>
   </div>
 
   <div id="ref-report-btn" style="display:none;margin-top:12px">
@@ -1103,14 +572,14 @@ textarea{resize:vertical;min-height:80px}
 
   <div class="loc-card">
     <div class="row1">
-      <div class="status" id="loc-status">🟠 מיקום חסום בסביבה הזו</div>
+      <div class="status" id="loc-status">🟡 מאתר מיקום...</div>
       <button class="refresh" onclick="refreshLocation()">📍 בקש מיקום</button>
     </div>
     <div class="coord" id="loc-coord">—</div>
-    <div id="loc-hint" style="font-size: 11px; color: var(--g600); margin-top: 6px; display: block; line-height: 1.4;">ℹ️ בסביבת Claude המיקום חסום. הורד את האפליקציה דרך כפתור השיתוף לקבלת מיקום מלא.</div>
+    <div id="loc-hint" style="font-size:11px;color:var(--g600);margin-top:6px;display:none;line-height:1.4"></div>
   </div>
 
-  <button class="btn btn-success btn-full" style="margin-bottom:14px;padding:14px;font-size:15px" onclick="sendWhatsAppNow()">💬 שלח הודעת חירום ב-WhatsApp</button>
+  <a id="sos-wa-btn" href="#" class="btn btn-success btn-full" style="margin-bottom:14px;padding:14px;font-size:15px;text-decoration:none" onclick="prepareSOSWhatsApp(event)">💬 שלח הודעת חירום ב-WhatsApp</a>
 
   <div class="settings-card">
     <h3>⚙️ הגדרות SOS</h3>
@@ -1196,11 +665,11 @@ textarea{resize:vertical;min-height:80px}
 
 <!-- BOTTOM NAV -->
 <nav class="bnav">
-  <button class="bnav-btn" data-page="home" onclick="goPage('home')"><span class="ic">🏠</span>בית</button>
+  <button class="bnav-btn on" data-page="home" onclick="goPage('home')"><span class="ic">🏠</span>בית</button>
   <button class="bnav-btn" data-page="schedule" onclick="goPage('schedule')"><span class="ic">📅</span>לו"ז</button>
   <button class="bnav-btn" data-page="security" onclick="goPage('security')"><span class="ic">🛡️</span>ביטחון</button>
   <button class="bnav-btn" data-page="reflect" onclick="goPage('reflect')"><span class="ic">📝</span>רפלקציה</button>
-  <button class="bnav-btn sos-nav on" data-page="sos" onclick="goPage('sos')"><span class="ic">🚨</span>SOS</button>
+  <button class="bnav-btn sos-nav" data-page="sos" onclick="goPage('sos')"><span class="ic">🚨</span>SOS</button>
   <button class="bnav-btn" data-page="admin" onclick="goPage('admin')"><span class="ic">⚙️</span>אדמין</button>
 </nav>
 
@@ -1217,52 +686,10 @@ textarea{resize:vertical;min-height:80px}
 <div id="sheet" class="sheet">
   <div class="sheet-handle"></div>
   <div class="sheet-header">
-    <h3 id="sheet-title">שיתוף וייצוא</h3>
+    <h3 id="sheet-title">—</h3>
     <button onclick="closeSheet()" style="font-size:20px;color:var(--g600);padding:4px 8px">✕</button>
   </div>
-  <div class="sheet-body" id="sheet-body">
-    
-    <div style="background:var(--amber-l);border:1px solid var(--amber);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.5;color:#7a5600">
-      <strong>⚠️ הקישור של האפליקציה הזו אישי</strong> — לשיתוף עם חברי המשלחת, השתמש ב<strong>"הורד את האפליקציה (HTML)"</strong> למטה ושלח את הקובץ.
-    </div>
-    <p style="color:var(--g600);font-size:13px;margin-bottom:14px">שתף עם חברי המשלחת או ייצא את התוכן לשימוש אישי.</p>
-
-    <div style="font-size:12px;font-weight:700;color:var(--g600);margin:8px 0 8px 2px">📤 שיתוף הקישור (אישי)</div>
-    <div class="share-opt wa" onclick="shareVia('whatsapp')">
-      <span class="ic">💬</span><div>WhatsApp</div>
-    </div>
-    <div class="share-opt tg" onclick="shareVia('native')">
-      <span class="ic">📲</span><div>שתף...</div>
-    </div>
-    <div class="share-opt mail" onclick="shareVia('email')">
-      <span class="ic">📧</span><div>אימייל</div>
-    </div>
-    <div class="share-opt copy" onclick="shareVia('copy')">
-      <span class="ic">📋</span><div>העתק קישור</div>
-    </div>
-
-    <div style="font-size:12px;font-weight:700;color:var(--g600);margin:18px 0 8px 2px">💾 ייצוא תוכן (מומלץ לשיתוף)</div>
-    <div class="share-opt" onclick="exportStandaloneHTML()" style="border:2px solid var(--blue);background:var(--blue-l)">
-      <span class="ic" style="background:var(--blue-l);color:var(--blue)">🌐</span>
-      <div><div>הורד את האפליקציה (HTML)</div><div style="font-size:12px;color:var(--g600);font-weight:400">קובץ שעובד במצב אופליין — שלח אותו כקובץ מצורף</div></div>
-    </div>
-    <div class="share-opt" onclick="exportScheduleText()">
-      <span class="ic" style="background:var(--amber-l);color:var(--amber)">📄</span>
-      <div><div>הורד לו"ז כטקסט</div><div style="font-size:12px;color:var(--g600);font-weight:400">.txt — לשיתוף ב-WhatsApp או אימייל</div></div>
-    </div>
-    <div class="share-opt" onclick="shareScheduleWhatsApp()">
-      <span class="ic" style="background:#25d36620;color:#25d366">📅</span>
-      <div><div>שלח לו"ז ב-WhatsApp</div><div style="font-size:12px;color:var(--g600);font-weight:400">גרסה קצרה מעוצבת</div></div>
-    </div>
-    <div class="share-opt" onclick="printSchedule()">
-      <span class="ic" style="background:var(--g100);color:var(--g900)">🖨️</span>
-      <div><div>הדפס / שמור PDF</div><div style="font-size:12px;color:var(--g600);font-weight:400">לו"ז מלא להדפסה</div></div>
-    </div>
-    <div class="share-opt" onclick="exportBackup();closeSheet();">
-      <span class="ic" style="background:var(--purple-l);color:var(--purple)">💾</span>
-      <div><div>גיבוי JSON</div><div style="font-size:12px;color:var(--g600);font-weight:400">לשחזור מלא של כל הנתונים</div></div>
-    </div>
-  </div>
+  <div class="sheet-body" id="sheet-body"></div>
   <div class="sheet-actions" id="sheet-actions" style="display:none"></div>
 </div>
 
@@ -1284,9 +711,6 @@ textarea{resize:vertical;min-height:80px}
 <!-- REPORT (PRINT) -->
 <section id="report-page" class="page"></section>
 
-<script>
-window.__BERLIN_PRELOAD__ = {"schedule":{"sun":{"label":"ראשון 26/4","dress":{"type":"casual","text":"לבוש נוח","detail":"👕 חולצה ומכנסיים ספורטיביים"},"hotel":null,"events":[{"id":"s1","time":"03:30","title":"כינוס נתב\"ג","detail":"טרמינל 3, מול דלפק מודיעין","loc":"Ben Gurion Airport Terminal 3 Israel","files":[]},{"id":"s2","time":"06:20","title":"המראה לברלין","detail":"אל על LY2371","loc":"Ben Gurion Airport Terminal 3 Israel","files":[]},{"id":"s3","time":"09:35","title":"נחיתה בברלין","detail":"⚠️ לא להתקדם עצמאית — להמתין ביציאה מהשרוול","loc":"Berlin Brandenburg Airport BER Terminal 1","files":[]},{"id":"s4","time":"10:30","title":"יציאה מהטרמינל","detail":"אוטובוס ממתין","loc":"Berlin Brandenburg Airport BER","files":[]},{"id":"s5","time":"17:00","title":"הגעה למלון RIU Plaza Berlin","detail":"כניסה לחדרים","loc":"RIU Plaza Berlin Hotel Germany","files":[]}]},"mon":{"label":"שני 27/4","dress":{"type":"formal","text":"חליפה ללא עניבה","detail":"👔 לבוש רשמי"},"hotel":{"name":"RIU Plaza Berlin","dates":"26.4–30.4","loc":"RIU Plaza Berlin Hotel Germany"},"events":[{"id":"m1","time":"09:00","title":"יציאה מהמלון","detail":"רכבת קלה, כרטיס חופשי יחולק","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"m2","time":"10:00","title":"פגישה עם מפכ\"לית ברלין + האקדמיה המשטרתית","detail":"","loc":"Berlin Police Headquarters Tempelhof","files":[]},{"id":"m3","time":"12:00","title":"זמן חופשי במרכז העיר","detail":"עד 14:00","loc":"Berlin Mitte city center","files":[]},{"id":"m4","time":"14:00","title":"פגישה — Command 11","detail":"מרכז פיקוד משטרתי","loc":"Berlin Police Command Center 11","files":[]},{"id":"m5","time":"17:00","title":"חזרה למלון — ערב חופשי","detail":"","loc":"RIU Plaza Berlin Hotel Germany","files":[]}]},"tue":{"label":"שלישי 28/4","dress":{"type":"formal","text":"חליפה ללא עניבה","detail":"👔 לבוש רשמי"},"hotel":{"name":"RIU Plaza Berlin","dates":"26.4–30.4","loc":"RIU Plaza Berlin Hotel Germany"},"events":[{"id":"t1","time":"09:00","title":"יציאה בתחב\"צ לפרלמנט","detail":"","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"t2","time":"10:00","title":"פגישה עם חבר פרלמנט","detail":"","loc":"Bundestag Reichstag Building Berlin","files":[]},{"id":"t3","time":"12:00","title":"סיום בפרלמנט — נסיעה לאוניברסיטה","detail":"","loc":"Bundestag Reichstag Building Berlin","files":[]},{"id":"t4","time":"14:00","title":"פעילות באוניברסיטה","detail":"","loc":"HWR Berlin Hochschule für Wirtschaft und Recht","files":[]},{"id":"t5","time":"17:00","title":"חזרה למלון — זמן חופשי","detail":"עד 19:00","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"t6","time":"19:00","title":"ערב מפקד — מלון קינג דייויד","detail":"יציאה במוניות, סיום משוער 23:00","loc":"Hotel Palace Berlin","files":[]}]},"wed":{"label":"רביעי 29/4","dress":{"type":"formal","text":"חליפה ללא עניבה","detail":"👔 לבוש רשמי"},"hotel":{"name":"RIU Plaza Berlin","dates":"26.4–30.4","loc":"RIU Plaza Berlin Hotel Germany"},"events":[{"id":"w1","time":"09:00","title":"יציאה בתחב\"צ — פעילות בפרלמנט","detail":"סיור + פגישות","loc":"Bundestag Reichstag Building Berlin","files":[]},{"id":"w2","time":"13:00","title":"נסיעה ל-Rola Solutions","detail":"","loc":"Rola Solutions GmbH Berlin","files":[]},{"id":"w3","time":"14:00","title":"פגישה עם נציגי Rola Solutions","detail":"","loc":"Rola Solutions GmbH Berlin","files":[]},{"id":"w4","time":"16:00","title":"סיום — זמן חופשי","detail":"","loc":"","files":[]}]},"thu":{"label":"חמישי 30/4","dress":{"type":"casual","text":"לבוש נוח","detail":"👕 אך התחשבו באופי המקום"},"hotel":null,"events":[{"id":"h1","time":"08:00","title":"פינוי חדרים","detail":"טסים: מזוודות לאוטובוס. נשארים: שמירת חפצים במלון","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"h2","time":"09:00","title":"יציאה לוילה ואנזה","detail":"אוטובוס צמוד כל היום","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"h3","time":"10:00","title":"פעילות בוילה ואנזה","detail":"סדנת \"בירוקרטים\" — תפקיד הפקידים ביישום הפתרון הסופי","loc":"Wannsee Conference House Villa Berlin","files":[]},{"id":"h4","time":"15:00","title":"סיום","detail":"טסים: קניון סמוך לשדה. נשארים: חופשי","loc":"","files":[]},{"id":"h5","time":"20:55","title":"טיסה לסופיה","detail":"Ryanair","loc":"Berlin Brandenburg Airport BER","files":[]},{"id":"h6","time":"00:10","title":"נחיתה בסופיה (שישי)","detail":"שאטל למלון","loc":"Sofia Airport Bulgaria","files":[]},{"id":"h7","time":"11:05","title":"המראה מסופיה (שישי)","detail":"אל על LY552","loc":"Sofia Airport Bulgaria","files":[]}]}},"messages":[{"title":"בדיקה","body":"נסיון","type":"urgent","time":"18:51:25","date":"23.4.2026"}],"offline":true,"exportedAt":"2026-04-24T12:11:37.778Z"};
-</script>
 <script>
 // ==================== DATA ====================
 const DRIVE_URL = 'https://drive.google.com/drive/folders/1B25Z583TOClY91nGGRSxkV2bCzbDNn0M';
@@ -1717,7 +1141,7 @@ function renderDay(k){
   let html = `<div class="day-block${on}" id="day-${k}">`;
   if(d.hotel){
     html += `<div class="hotel-card"><div><div class="n">🏨 ${escHtml(d.hotel.name)}</div><div class="d">לינה ${escHtml(d.hotel.dates)}</div></div>`;
-    if(d.hotel.loc) html += `<a class="mp" href="${mapUrl(d.hotel.loc)}" target="_blank" rel="noopener">📍 מפה</a>`;
+    if(d.hotel.loc) html += `<a class="mp" href="${mapUrl(d.hotel.loc)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">📍 מפה</a>`;
     html += `</div>`;
   }
   if(d.dress){
@@ -1737,7 +1161,7 @@ function renderEvent(dk,e){
       return `<button class="file-chip" onclick="downloadFile('${dk}','${e.id}',${i})">${ic} ${escHtml(f.name)} <span class="sz">${Math.round(f.size/1024)}KB</span></button>`;
     }).join('')}</div>`;
   }
-  const mapLink = e.loc ? `<a class="map-link" href="${mapUrl(e.loc)}" target="_blank" rel="noopener">📍 מפה</a>` : '';
+  const mapLink = e.loc ? `<a class="map-link" href="${mapUrl(e.loc)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">📍 מפה</a>` : '';
   return `<div class="ev-card">
     <div class="top-row">
       <div class="time">${escHtml(e.time)}</div>
@@ -2178,6 +1602,30 @@ function sendWhatsAppNow(){
   if(!num){ toast('✋ הגדר מספר WhatsApp בהגדרות','err'); return; }
   safeOpen(`https://wa.me/${num}?text=${msg}`);
 }
+
+// Direct click handler for the main SOS WhatsApp button.
+// Mobile browsers block window.open() when it's called async (after delay).
+// This handler sets the href right before the browser follows the link —
+// all inside the SAME user click event, which browsers always honor.
+function prepareSOSWhatsApp(ev){
+  const num = lsGet('sos_num','').replace(/[^0-9]/g,'');
+  if(!num){
+    ev.preventDefault();
+    toast('✋ הגדר מספר WhatsApp בהגדרות','err');
+    return false;
+  }
+  const msg = encodeURIComponent(buildSOSMessage());
+  const url = `https://wa.me/${num}?text=${msg}`;
+  // Update the anchor's href so the native click behavior opens the correct URL
+  const el = document.getElementById('sos-wa-btn');
+  if(el){
+    el.href = url;
+    el.target = '_blank';
+    el.rel = 'noopener';
+  }
+  // Don't preventDefault — let the browser follow the link naturally
+  return true;
+}
 function saveSOSSettings(){
   lsSet('sos_name',document.getElementById('sos-name').value);
   lsSet('sos_num',document.getElementById('sos-num').value);
@@ -2384,7 +1832,7 @@ function showSOSActionsPanel(){
   const waUrl = num ? `https://wa.me/${num}?text=${encodeURIComponent(msg)}` : '';
   const grpUrl = grp || '';
   const hasLocation = !!currentLoc;
-  const mapUrl = currentLoc ? `https://maps.google.com/?q=${currentLoc.coords.latitude.toFixed(5)},${currentLoc.coords.longitude.toFixed(5)}` : '';
+  const googleMapsUrl = currentLoc ? `https://maps.google.com/?q=${currentLoc.coords.latitude.toFixed(5)},${currentLoc.coords.longitude.toFixed(5)}` : '';
 
   currentSheetType='sosActions';
   document.getElementById('sheet-title').textContent='🚨 שליחת הודעת חירום';
@@ -2400,19 +1848,19 @@ function showSOSActionsPanel(){
       ${locBadge}
     </div>
 
-    ${waUrl ? `<button class="btn btn-success btn-full" onclick="safeOpen(${JSON.stringify(waUrl)})" style="margin-bottom:8px;padding:16px;font-size:16px">
+    ${waUrl ? `<a href="${waUrl}" target="_blank" rel="noopener" class="btn btn-success btn-full" style="margin-bottom:8px;padding:16px;font-size:16px;text-decoration:none">
       💬 שלח WhatsApp לאיש קשר
-    </button>` : `<div style="background:var(--amber-l);padding:10px;border-radius:8px;margin-bottom:8px;font-size:13px;color:#7a5600">
+    </a>` : `<div style="background:var(--amber-l);padding:10px;border-radius:8px;margin-bottom:8px;font-size:13px;color:#7a5600">
       ⚠️ לא הוגדר מספר WhatsApp. עבור להגדרות SOS להוסיף.
     </div>`}
 
-    ${grpUrl ? `<button class="btn btn-primary btn-full" onclick="safeOpen(${JSON.stringify(grpUrl)})" style="margin-bottom:8px">
+    ${grpUrl ? `<a href="${grpUrl}" target="_blank" rel="noopener" class="btn btn-primary btn-full" style="margin-bottom:8px;text-decoration:none">
       👥 פתח קבוצת WhatsApp
-    </button>` : ''}
+    </a>` : ''}
 
-    ${hasLocation ? `<button class="btn btn-ghost btn-full" onclick="safeOpen(${JSON.stringify(mapUrl)})" style="margin-bottom:8px">
+    ${hasLocation ? `<a href="${googleMapsUrl}" target="_blank" rel="noopener" class="btn btn-ghost btn-full" style="margin-bottom:8px;text-decoration:none">
       🗺️ הצג מיקום במפה
-    </button>` : ''}
+    </a>` : ''}
 
     <button class="btn btn-ghost btn-full" onclick="copySOSMessage()" style="margin-bottom:8px">
       📋 העתק את הודעת החירום
@@ -3070,6 +2518,5 @@ async function init(){
 }
 init();
 </script>
-
-
-</body></html>
+</body>
+</html>
