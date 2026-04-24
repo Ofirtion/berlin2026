@@ -8,6 +8,40 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<!-- Firebase (Realtime Database) -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, get, onValue, off } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCXAbzEYGs8bkiCcC2e95mElH95FZUUWOE",
+    authDomain: "berlin2026-regavim.firebaseapp.com",
+    databaseURL: "https://berlin2026-regavim-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "berlin2026-regavim",
+    storageBucket: "berlin2026-regavim.firebasestorage.app",
+    messagingSenderId: "811505121591",
+    appId: "1:811505121591:web:bc18051379322cb34a02b2"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  // Expose a minimal API on window so the rest of the app can use it
+  window.fbDB = {
+    set: async (key, value) => set(ref(db, key), value),
+    get: async (key) => {
+      const snap = await get(ref(db, key));
+      return snap.exists() ? snap.val() : null;
+    },
+    subscribe: (key, callback) => {
+      const r = ref(db, key);
+      onValue(r, (snap) => callback(snap.exists() ? snap.val() : null));
+      return () => off(r);
+    }
+  };
+  window.fbReady = true;
+  window.dispatchEvent(new Event('fb-ready'));
+</script>
 <style>
 :root{
   --blue:#1a5fa5; --blue-l:#e6f1fb; --blue-d:#0c447c; --blue-m:#2a7acc;
@@ -807,7 +841,8 @@ let locWatch = null;
 let currentUploadedImages = [];
 let broadcastQueue = [];
 let currentSheetType = '';
-let cloudAvailable = (typeof window.storage !== 'undefined') && !isOfflineCopy;
+let cloudAvailable = false;
+let fbUnsubscribers = [];
 
 // ==================== UTILITIES ====================
 function escHtml(s){
@@ -834,25 +869,32 @@ function toast(msg,type='info'){
   setTimeout(()=>d.remove(),2500);
 }
 
-// ==================== CLOUD STORAGE (shared) ====================
+// ==================== CLOUD STORAGE (Firebase Realtime Database) ====================
 async function cloudGet(key){
-  if(!cloudAvailable) return null;
+  if(!window.fbDB) return null;
   try{
-    const r = await window.storage.get(key, true);
-    return r ? JSON.parse(r.value) : null;
-  }catch(e){ return null; }
+    return await window.fbDB.get(key);
+  }catch(e){
+    console.warn('Firebase get failed:', e);
+    return null;
+  }
 }
 async function cloudSet(key,val){
-  if(!cloudAvailable) return false;
+  if(!window.fbDB) return false;
   try{
-    await window.storage.set(key, JSON.stringify(val), true);
+    await window.fbDB.set(key, val);
+    cloudAvailable = true;
     return true;
   }catch(e){
-    console.warn('cloud set err',e);
+    console.warn('Firebase set failed:', e);
     return false;
   }
 }
 async function loadFromCloud(){
+  if(!window.fbDB){
+    updateSyncPill(false);
+    return;
+  }
   try{
     const [sch, msgs] = await Promise.all([
       cloudGet('berlin_schedule'),
@@ -860,18 +902,65 @@ async function loadFromCloud(){
     ]);
     if(sch && typeof sch==='object' && sch.sun){ schedule = sch; }
     if(Array.isArray(msgs)){ messages = msgs; }
+    else if(msgs && typeof msgs==='object'){
+      // Firebase sometimes stores arrays as objects — convert back
+      messages = Object.keys(msgs).sort().map(k=>msgs[k]).filter(m=>m);
+    }
+    cloudAvailable = true;
     updateSyncPill(true);
   }catch(e){
+    cloudAvailable = false;
     updateSyncPill(false);
   }
+}
+
+// Set up realtime listeners - updates arrive automatically when anyone changes data
+function subscribeToCloudUpdates(){
+  if(!window.fbDB || isOfflineCopy) return;
+
+  // Unsubscribe previous listeners if any
+  fbUnsubscribers.forEach(u=>{ try{ u(); }catch(e){} });
+  fbUnsubscribers = [];
+
+  // Subscribe to schedule changes
+  const unsubSch = window.fbDB.subscribe('berlin_schedule', (data)=>{
+    if(data && typeof data==='object' && data.sun){
+      schedule = data;
+      lsSet('berlin_schedule', schedule);
+      if(document.getElementById('page-schedule').classList.contains('on')) renderSchedule();
+      if(document.getElementById('page-home').classList.contains('on')) renderHome();
+      if(document.getElementById('page-admin').classList.contains('on') && isAdminLogged()){
+        renderAdmEvents();
+      }
+    }
+  });
+  fbUnsubscribers.push(unsubSch);
+
+  // Subscribe to messages changes - real-time broadcast!
+  const unsubMsgs = window.fbDB.subscribe('berlin_msgs', (data)=>{
+    let newMessages = [];
+    if(Array.isArray(data)) newMessages = data.filter(m=>m);
+    else if(data && typeof data==='object'){
+      newMessages = Object.keys(data).sort().map(k=>data[k]).filter(m=>m);
+    }
+    const prevIds = new Set(messages.map(m=>m.id));
+    const genuinelyNew = newMessages.filter(m=>m && !prevIds.has(m.id));
+    messages = newMessages;
+    lsSet('berlin_msgs', messages);
+    if(genuinelyNew.length && !document.getElementById('bc-overlay').classList.contains('on')){
+      checkBroadcasts();
+    }
+    if(document.getElementById('page-admin').classList.contains('on')) renderMsgHistory();
+  });
+  fbUnsubscribers.push(unsubMsgs);
 }
 function updateSyncPill(ok){
   const p = document.getElementById('sync-pill');
   const t = document.getElementById('sync-txt');
   if(!p) return;
-  if(ok && cloudAvailable){
+  if(ok && window.fbDB){
     p.classList.remove('off');
-    t.textContent='ענן פעיל';
+    t.textContent='מחובר לענן';
   }else{
     p.classList.add('off');
     t.textContent='מקומי בלבד';
@@ -2403,6 +2492,19 @@ async function exportStandaloneHTML(){
 }
 
 // ==================== INIT ====================
+// Wait for Firebase SDK to be ready (it loads as ES module, may not be ready immediately)
+function waitForFirebase(timeoutMs=5000){
+  return new Promise(resolve=>{
+    if(window.fbReady) return resolve(true);
+    const onReady = ()=>{ resolve(true); };
+    window.addEventListener('fb-ready', onReady, {once:true});
+    setTimeout(()=>{
+      window.removeEventListener('fb-ready', onReady);
+      resolve(!!window.fbReady);
+    }, timeoutMs);
+  });
+}
+
 async function init(){
   loadLocal();
   // If running as offline copy, skip cloud loading
@@ -2413,59 +2515,54 @@ async function init(){
     renderReflections();
     updateSyncPill(false);
     startLocation();
-    loadWeather(); // will try to fetch; if offline will show cached or error gracefully
-    // Show a banner
+    loadWeather();
     const banner = document.createElement('div');
     banner.style.cssText='background:var(--amber-l);color:var(--amber);border-bottom:1px solid var(--amber);padding:8px 14px;text-align:center;font-size:12px;font-weight:600;position:sticky;top:60px;z-index:45';
     banner.innerHTML = '📴 מצב אופליין — ללא סנכרון ענן';
     document.querySelector('.hdr').insertAdjacentElement('afterend',banner);
     return;
   }
-  // Render initial schedule (from defaults / local fallback)
+  // Render initial schedule (from defaults / local cache) immediately
   renderSchedule();
   renderHome();
   renderRefDays();
   renderReflections();
-  // Load from cloud (authoritative), then re-render
-  await loadFromCloud();
-  renderSchedule();
-  renderHome();
-  // Cache to local
-  lsSet('berlin_schedule', schedule);
-  lsSet('berlin_msgs', messages);
+  // Show weather and location right away
+  loadWeather();
+  startLocation();
+
+  // Wait for Firebase to be ready, then load from cloud and subscribe to realtime updates
+  const fbReady = await waitForFirebase(5000);
+  if(fbReady){
+    await loadFromCloud();
+    renderSchedule();
+    renderHome();
+    lsSet('berlin_schedule', schedule);
+    lsSet('berlin_msgs', messages);
+    // Seed cloud with local schedule if cloud is empty (first run)
+    if(window.fbDB){
+      try{
+        const cloudSch = await cloudGet('berlin_schedule');
+        if(!cloudSch){ await cloudSet('berlin_schedule', schedule); }
+      }catch(e){}
+    }
+    // Subscribe to realtime updates — this is the magic:
+    // when anyone edits the schedule or sends a message, everyone sees it immediately
+    subscribeToCloudUpdates();
+  } else {
+    updateSyncPill(false);
+  }
   // Check broadcasts
   checkBroadcasts();
-  // Load weather forecast in background
-  loadWeather();
-  // Start location watch in background
-  startLocation();
-  // Poll cloud every 60s for updates (skip in offline mode)
-  if(!isOfflineCopy){
-    setInterval(async ()=>{
-      const prevMsgIds = new Set(messages.map(m=>m.id));
-      await loadFromCloud();
-      // refresh views if visible
-      if(document.getElementById('page-schedule').classList.contains('on')) renderSchedule();
-      if(document.getElementById('page-home').classList.contains('on')) renderHome();
-      // Check if there are genuinely new messages (not just reloaded old ones)
-      const newOnes = messages.filter(m=>!prevMsgIds.has(m.id));
-      if(newOnes.length && !document.getElementById('bc-overlay').classList.contains('on')){
-        checkBroadcasts();
-      }
-      if(document.getElementById('page-admin').classList.contains('on')) renderMsgHistory();
-    }, 60000);
-  }
 
   // Recovery: when returning to the app from an external app (phone, WhatsApp, maps),
   // make sure we have a visible page and nothing is stuck in a half-state.
   document.addEventListener('visibilitychange', ()=>{
     if(document.hidden) return;
-    // Close any lingering countdown overlay
     if(document.getElementById('cd-overlay').classList.contains('on')){
       if(countdownInt){ clearInterval(countdownInt); countdownInt=null; }
       document.getElementById('cd-overlay').classList.remove('on');
     }
-    // Ensure at least one page is active
     const anyActive = document.querySelector('.page.on');
     if(!anyActive){
       goPage('home');
