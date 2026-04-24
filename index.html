@@ -82,13 +82,15 @@ textarea{resize:vertical;min-height:80px}
 @keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 
 /* HOME */
-.hero{background:linear-gradient(135deg,var(--blue) 0%,var(--blue-d) 100%);color:#fff;border-radius:16px;padding:22px 18px;margin-bottom:14px;position:relative;overflow:hidden}
-.hero::before{content:"";position:absolute;top:-40px;left:-40px;width:140px;height:140px;background:rgba(255,255,255,0.08);border-radius:50%}
-.hero::after{content:"";position:absolute;bottom:-30px;right:-30px;width:100px;height:100px;background:rgba(255,255,255,0.06);border-radius:50%}
-.hero-flag{font-size:32px;margin-bottom:6px;position:relative}
-.hero-title{font-size:22px;font-weight:700;line-height:1.2;position:relative}
-.hero-dates{font-size:13px;opacity:0.9;margin-top:4px;position:relative}
-.hero-greet{font-size:14px;margin-top:12px;background:rgba(255,255,255,0.15);padding:8px 12px;border-radius:20px;display:inline-block;position:relative}
+.hero{background:linear-gradient(135deg,var(--blue) 0%,var(--blue-d) 100%);color:#fff;border-radius:16px;padding:24px 18px;margin-bottom:14px;position:relative;overflow:hidden;text-align:center}
+.hero-bg{position:absolute;inset:0;background:radial-gradient(circle at 30% 20%,rgba(255,255,255,0.12) 0%,transparent 50%),radial-gradient(circle at 70% 80%,rgba(255,255,255,0.08) 0%,transparent 50%);pointer-events:none}
+.hero-logo{width:140px;height:140px;object-fit:contain;background:#fff;border-radius:50%;padding:8px;box-shadow:0 6px 20px rgba(0,0,0,0.2);position:relative;z-index:1;margin-bottom:14px;border:3px solid rgba(255,255,255,0.3)}
+.hero-content{position:relative;z-index:1}
+.hero-eyebrow{font-size:13px;font-weight:600;opacity:0.9;letter-spacing:1px;margin-bottom:4px}
+.hero-title{font-size:28px;font-weight:800;line-height:1.1;margin-bottom:8px;text-shadow:0 2px 8px rgba(0,0,0,0.15)}
+.hero-flags{font-size:24px;margin:6px 0;letter-spacing:6px}
+.hero-dates{font-size:13px;opacity:0.9;margin-top:4px}
+.hero-greet{font-size:14px;margin-top:14px;background:rgba(255,255,255,0.18);padding:8px 16px;border-radius:20px;display:inline-block;backdrop-filter:blur(4px);font-weight:500}
 
 .today-strip{background:#fff;border:1px solid var(--g100);border-right:4px solid var(--blue);border-radius:var(--r);padding:14px;margin-bottom:14px;box-shadow:var(--shadow)}
 
@@ -368,8 +370,8 @@ textarea{resize:vertical;min-height:80px}
   <div class="hdr-title">
     <span class="plane">✈️</span>
     <div>
-      <div class="nm">משלחת ברלין 2026</div>
-      <div class="dt">26–30.4</div>
+      <div class="nm">משלחת מב"ל רגבים</div>
+      <div class="dt">ברלין · 26–30.4</div>
     </div>
   </div>
   <div class="hdr-actions">
@@ -383,10 +385,15 @@ textarea{resize:vertical;min-height:80px}
 <!-- HOME PAGE -->
 <section id="page-home" class="page on">
   <div class="hero">
-    <div class="hero-flag">🇩🇪</div>
-    <div class="hero-title">משלחת ברלין 2026</div>
-    <div class="hero-dates">26–30 באפריל 2026</div>
-    <div class="hero-greet" id="greet">שלום</div>
+    <div class="hero-bg"></div>
+    <img src="logo.png" alt="לוגו משלחת" class="hero-logo" onerror="this.style.display='none'">
+    <div class="hero-content">
+      <div class="hero-eyebrow">משלחת מב"ל רגבים</div>
+      <div class="hero-title">ברלין 2026</div>
+      <div class="hero-flags">🇮🇱 🇩🇪</div>
+      <div class="hero-dates">26–30 באפריל 2026</div>
+      <div class="hero-greet" id="greet">שלום</div>
+    </div>
   </div>
 
   <div id="weather-widget" class="weather-widget" style="display:none"></div>
