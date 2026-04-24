@@ -245,6 +245,22 @@ textarea{resize:vertical;min-height:80px}
 .settings-card label{display:block;font-size:12px;font-weight:600;color:var(--g600);margin:8px 0 4px 0}
 
 /* ADMIN */
+.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:4px}
+.stat-card{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:14px;text-align:center;box-shadow:var(--shadow)}
+.stat-card .stat-n{font-size:28px;font-weight:800;color:var(--blue);line-height:1;margin-bottom:4px}
+.stat-card .stat-l{font-size:11px;color:var(--g600);font-weight:600}
+
+.user-row{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:10px 12px;margin-bottom:6px;display:flex;align-items:center;gap:10px;box-shadow:var(--shadow)}
+.user-row .avatar{width:36px;height:36px;border-radius:50%;background:var(--blue-l);color:var(--blue);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0}
+.user-row .info{flex:1;min-width:0}
+.user-row .nm{font-weight:600;font-size:14px;line-height:1.3}
+.user-row .details{font-size:11px;color:var(--g600);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.user-row .badges{display:flex;gap:4px;margin-top:4px}
+.user-row .badge{font-size:10px;padding:2px 6px;border-radius:10px;font-weight:600}
+.user-row .badge.ok{background:var(--green-l);color:var(--green)}
+.user-row .badge.miss{background:var(--g100);color:var(--g600)}
+.user-row .time{font-size:10px;color:var(--g600);flex-shrink:0;text-align:left}
+
 .admin-login{max-width:360px;margin:40px auto;background:#fff;border-radius:var(--r);padding:24px;box-shadow:var(--shadow);text-align:center;border:1px solid var(--g100)}
 .admin-login .ic{font-size:42px;margin-bottom:10px}
 .admin-login h2{font-size:20px;margin-bottom:6px}
@@ -653,6 +669,7 @@ textarea{resize:vertical;min-height:80px}
     <div class="adm-tabs">
       <button class="adm-tab on" data-adm="schedule" onclick="switchAdm('schedule')">📅 לו"ז</button>
       <button class="adm-tab" data-adm="msgs" onclick="switchAdm('msgs')">📢 הודעות</button>
+      <button class="adm-tab" data-adm="analytics" onclick="switchAdm('analytics')">📊 נתונים</button>
       <button class="adm-tab" data-adm="settings" onclick="switchAdm('settings')">⚙️ הגדרות</button>
     </div>
 
@@ -679,6 +696,28 @@ textarea{resize:vertical;min-height:80px}
       </div>
       <h2 class="section-title">📜 היסטוריית הודעות</h2>
       <div id="msg-history"></div>
+    </div>
+
+    <div id="adm-analytics" class="adm-panel">
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-n" id="stat-total">—</div><div class="stat-l">סה"כ כניסות</div></div>
+        <div class="stat-card"><div class="stat-n" id="stat-active">—</div><div class="stat-l">פעילים ב-24ש׳</div></div>
+        <div class="stat-card"><div class="stat-n" id="stat-sos">—</div><div class="stat-l">מילאו פרטי SOS</div></div>
+        <div class="stat-card"><div class="stat-n" id="stat-itzik">—</div><div class="stat-l">מילאו איש קשר</div></div>
+      </div>
+
+      <div style="display:flex;gap:6px;margin-top:12px;margin-bottom:10px">
+        <button class="btn btn-ghost" style="flex:1;padding:10px;font-size:13px" onclick="refreshAnalytics()">🔄 רענן</button>
+        <button class="btn btn-ghost" style="flex:1;padding:10px;font-size:13px" onclick="exportAnalytics()">💾 ייצא CSV</button>
+      </div>
+
+      <h2 class="section-title">👥 משתמשים רשומים</h2>
+      <div id="users-list"></div>
+
+      <div style="background:var(--blue-l);border:1px solid var(--blue);border-radius:10px;padding:12px;margin-top:14px;font-size:12px;color:var(--blue-d);line-height:1.6">
+        <strong>💡 איך זה עובד?</strong><br>
+        כשמשתמש נכנס לאפליקציה ראשונה, נוצר עבורו מזהה אקראי בדפדפן שלו. כשהוא ממלא שם או מספר WhatsApp, הפרטים נשמרים בענן. הפרטים מוצגים כאן בלבד עבור האדמין.
+      </div>
     </div>
 
     <div id="adm-settings" class="adm-panel">
@@ -850,6 +889,133 @@ let broadcastQueue = [];
 let currentSheetType = '';
 let cloudAvailable = false;
 let fbUnsubscribers = [];
+
+// ==================== USER TRACKING (Analytics) ====================
+// Generate or get the unique user ID for this browser
+function getUserId(){
+  let uid = localStorage.getItem('berlin_uid');
+  if(!uid){
+    uid = 'u_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+    localStorage.setItem('berlin_uid', uid);
+    localStorage.setItem('berlin_uid_first', new Date().toISOString());
+  }
+  return uid;
+}
+
+// Sync this user's profile to Firebase - called on load and when settings change
+async function syncUserProfile(){
+  if(!window.fbDB || isOfflineCopy) return;
+  const uid = getUserId();
+  const name = lsGet('sos_name','') || '';
+  const sosNum = lsGet('sos_num','') || '';
+  const itzikNum = lsGet('itzik_num','') || '';
+  const firstSeen = localStorage.getItem('berlin_uid_first') || new Date().toISOString();
+
+  const profile = {
+    uid,
+    name: name || null,
+    hasSosNum: !!sosNum,
+    hasItzik: !!itzikNum,
+    firstSeen,
+    lastSeen: new Date().toISOString(),
+    ua: (navigator.userAgent || '').slice(0, 120)
+  };
+  try{
+    await window.fbDB.set('users/' + uid, profile);
+  }catch(e){
+    console.warn('user sync failed:', e);
+  }
+}
+
+// Fetch all users from Firebase (admin only)
+async function fetchAllUsers(){
+  if(!window.fbDB) return [];
+  try{
+    const data = await window.fbDB.get('users');
+    if(!data) return [];
+    // Firebase may return as object — convert to array
+    const users = Object.values(data).filter(u => u && u.uid);
+    // Sort by last seen, most recent first
+    users.sort((a,b)=>(b.lastSeen||'').localeCompare(a.lastSeen||''));
+    return users;
+  }catch(e){
+    console.warn('fetch users failed:', e);
+    return [];
+  }
+}
+
+async function refreshAnalytics(){
+  const users = await fetchAllUsers();
+  const now = Date.now();
+  const day = 24*60*60*1000;
+  const active24h = users.filter(u=>{
+    const ts = new Date(u.lastSeen).getTime();
+    return !isNaN(ts) && (now - ts < day);
+  }).length;
+  const withSos = users.filter(u=>u.hasSosNum).length;
+  const withItzik = users.filter(u=>u.hasItzik).length;
+
+  document.getElementById('stat-total').textContent = users.length;
+  document.getElementById('stat-active').textContent = active24h;
+  document.getElementById('stat-sos').textContent = withSos;
+  document.getElementById('stat-itzik').textContent = withItzik;
+
+  const box = document.getElementById('users-list');
+  if(!users.length){
+    box.innerHTML = `<div style="text-align:center;padding:20px;color:var(--g600);font-size:13px">עדיין לא נרשמו משתמשים</div>`;
+    return;
+  }
+  box.innerHTML = users.map(u=>{
+    const name = u.name || '(ללא שם)';
+    const initial = (u.name || '?').charAt(0).toUpperCase();
+    const lastSeen = u.lastSeen ? new Date(u.lastSeen) : null;
+    let timeStr = '—';
+    if(lastSeen){
+      const mins = Math.round((now - lastSeen.getTime()) / 60000);
+      if(mins < 1) timeStr = 'כעת';
+      else if(mins < 60) timeStr = `לפני ${mins} דק'`;
+      else if(mins < 60*24) timeStr = `לפני ${Math.floor(mins/60)} שעות`;
+      else timeStr = lastSeen.toLocaleDateString('he-IL',{day:'2-digit',month:'2-digit'});
+    }
+    const firstStr = u.firstSeen ? new Date(u.firstSeen).toLocaleDateString('he-IL',{day:'2-digit',month:'2-digit'}) : '';
+    return `<div class="user-row">
+      <div class="avatar">${escHtml(initial)}</div>
+      <div class="info">
+        <div class="nm">${escHtml(name)}</div>
+        <div class="details">נרשם: ${escHtml(firstStr)}</div>
+        <div class="badges">
+          <span class="badge ${u.hasSosNum?'ok':'miss'}">${u.hasSosNum?'✓ SOS':'✗ SOS'}</span>
+          <span class="badge ${u.hasItzik?'ok':'miss'}">${u.hasItzik?'✓ איציק':'✗ איציק'}</span>
+        </div>
+      </div>
+      <div class="time">${escHtml(timeStr)}</div>
+    </div>`;
+  }).join('');
+}
+
+function exportAnalytics(){
+  fetchAllUsers().then(users=>{
+    const rows = [['ID','שם','מספר SOS','איש קשר (איציק)','כניסה ראשונה','כניסה אחרונה']];
+    users.forEach(u=>{
+      rows.push([
+        u.uid,
+        u.name || '',
+        u.hasSosNum ? 'כן' : 'לא',
+        u.hasItzik ? 'כן' : 'לא',
+        u.firstSeen || '',
+        u.lastSeen || ''
+      ]);
+    });
+    // Add BOM for Excel UTF-8 compatibility
+    const csv = '\ufeff' + rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'berlin2026_users_'+new Date().toISOString().slice(0,10)+'.csv';
+    a.click();
+    toast('✅ קובץ CSV הורד');
+  });
+}
 
 // ==================== UTILITIES ====================
 function escHtml(s){
@@ -1429,6 +1595,7 @@ function saveItzik(){
   const v = document.getElementById('itzik-num').value.trim();
   lsSet('itzik_num', v);
   updateItzikLink(v);
+  syncUserProfile();
   toast('✅ נשמר');
 }
 
@@ -1726,6 +1893,7 @@ function saveSOSSettings(){
   lsSet('sos_name',document.getElementById('sos-name').value);
   lsSet('sos_num',document.getElementById('sos-num').value);
   lsSet('sos_grp',document.getElementById('sos-grp').value);
+  syncUserProfile();
   toast('✅ הגדרות נשמרו');
 }
 
@@ -2033,6 +2201,7 @@ function switchAdm(k){
   document.querySelectorAll('.adm-tab').forEach(b=>b.classList.toggle('on',b.dataset.adm===k));
   document.querySelectorAll('.adm-panel').forEach(p=>p.classList.remove('on'));
   document.getElementById('adm-'+k).classList.add('on');
+  if(k==='analytics') refreshAnalytics();
 }
 function renderAdmDaySel(){
   const sel = document.getElementById('adm-day-sel');
@@ -2556,6 +2725,8 @@ async function init(){
     // Subscribe to realtime updates — this is the magic:
     // when anyone edits the schedule or sends a message, everyone sees it immediately
     subscribeToCloudUpdates();
+    // Register this user in the analytics list
+    syncUserProfile();
   } else {
     updateSyncPill(false);
   }
