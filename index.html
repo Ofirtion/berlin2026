@@ -922,12 +922,12 @@ textarea{resize:vertical;min-height:80px}
     <div id="loc-hint" style="font-size:11px;color:var(--g600);margin-top:6px;display:none;line-height:1.4"></div>
   </div>
 
-  <a id="sos-wa-btn" href="#" class="btn btn-success btn-full" style="margin-bottom:14px;padding:14px;font-size:15px;text-decoration:none" onclick="prepareSOSWhatsApp(event)">💬 שלח הודעת חירום לקבוצת המשלחת</a>
+  <button id="sos-wa-btn" class="btn btn-success btn-full" style="margin-bottom:14px;padding:14px;font-size:15px" onclick="showSOSReadyToSend()">💬 שלח הודעת חירום לקבוצת המשלחת</button>
 
   <div style="background:var(--blue-l);border:1px solid var(--blue);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:var(--blue-d);line-height:1.5">
     <strong>💡 איך זה עובד:</strong><br>
-    הלחיצה על הכפתור פותחת את <strong>קבוצת החירום של המשלחת</strong> בוואטסאפ.<br>
-    ההודעה כוללת את <strong>שמך</strong> ואת <strong>המיקום הנוכחי</strong> שלך (אם אישרת מיקום) - הכל מוכן להדבקה ושליחה.
+    הלחיצה על הכפתור מציגה את <strong>ההודעה המוכנה</strong> עם שמך ומיקומך.<br>
+    בלחיצה על "פתח את הקבוצה" - ההודעה תועתק וכל מה שנשאר לך הוא <strong>להדביק (Paste) ולשלוח</strong> בקבוצה.
   </div>
 
   <div class="settings-card">
@@ -3292,43 +3292,133 @@ function refreshLocation(){
 }
 function buildSOSMessage(){
   const name = lsGet('sos_name','') || 'משתתף משלחת';
-  const now = new Date().toLocaleString('he-IL');
-  let locPart = 'מיקום: לא זמין';
-  let mapPart = '';
+  const time = new Date().toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'});
+  let msg = `🚨 *מצוקה - דרוש סיוע מיידי*
+
+👤 ${name}
+🕐 ${time}`;
+
   if(currentLoc){
     const lat = currentLoc.coords.latitude.toFixed(5);
     const lon = currentLoc.coords.longitude.toFixed(5);
-    const acc = Math.round(currentLoc.coords.accuracy);
-    locPart = `📍 מיקום: ${lat}, ${lon} (דיוק ±${acc}מ')`;
-    mapPart = `\n\n📍 קישור למפה:\nhttps://maps.google.com/?q=${lat},${lon}`;
+    msg += `\n📍 מיקום: https://maps.google.com/?q=${lat},${lon}`;
+  } else {
+    msg += `\n📍 מיקום: לא זמין`;
   }
-  return `🚨 *התראת מצוקה – משלחת ברלין 2026*\n\n👤 שם: ${name}\n${locPart}${mapPart}\n\n🕐 שעה: ${now}\n\nנדרש סיוע מיידי!\n☎️ משטרת ברלין: *110*`;
-}
-// Direct click handler for the main SOS WhatsApp button.
-// Mobile browsers block window.open() when it's called async (after delay).
-// This handler sets the href right before the browser follows the link —
-// all inside the SAME user click event, which browsers always honor.
-//
-// The destination is always the FIXED delegation emergency group (SOS_GROUP_URL).
-// The message is auto-copied to clipboard so the user just pastes & sends.
-function prepareSOSWhatsApp(ev){
-  // Auto-copy the SOS message to clipboard so user can paste in the group
-  try{
-    const plainMsg = buildSOSMessage();
-    if(navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(plainMsg).catch(()=>{});
-    }
-  }catch(e){}
 
-  // Update the anchor's href to the fixed group URL
-  const el = document.getElementById('sos-wa-btn');
-  if(el){
-    el.href = SOS_GROUP_URL;
-    el.target = '_blank';
-    el.rel = 'noopener';
+  msg += `\n\nאני זקוק לעזרה. אנא צרו קשר מיידית.`;
+  return msg;
+}
+// Open a sheet showing the SOS message ready to send.
+// Step 1: User reviews the message.
+// Step 2: User clicks "Open the group" - message is auto-copied and group opens.
+// Step 3: User pastes & sends in WhatsApp.
+//
+// Why this two-step UI? WhatsApp invite/group links don't support ?text= prefilling
+// (this is a WhatsApp limitation, not ours). The closest we can get is auto-copy
+// + open the group, then user does cmd+V / paste.
+function showSOSReadyToSend(){
+  const msg = buildSOSMessage();
+  const hasLocation = !!currentLoc;
+  const userName = lsGet('sos_name','') || '';
+
+  currentSheetType = 'sosReady';
+  document.getElementById('sheet-title').textContent = '🚨 הודעת חירום מוכנה';
+
+  const nameWarning = !userName ? `
+    <div style="background:#fff3cd;border:1px solid #d4a300;border-radius:8px;padding:10px;margin-bottom:12px;font-size:12px;color:#8a6800;line-height:1.5">
+      ⚠️ <strong>השם שלך לא מוגדר</strong> - ההודעה תישלח עם "משתתף משלחת". <br>
+      מומלץ להגדיר שם בהגדרות SOS למטה.
+    </div>` : '';
+
+  const locWarning = !hasLocation ? `
+    <div style="background:#fff3cd;border:1px solid #d4a300;border-radius:8px;padding:10px;margin-bottom:12px;font-size:12px;color:#8a6800;line-height:1.5">
+      ⚠️ <strong>המיקום שלך לא זמין</strong> - ההודעה תישלח בלי מיקום GPS.<br>
+      <button onclick="refreshLocationInline()" style="margin-top:6px;background:#d4a300;color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit">📍 בקש מיקום עכשיו</button>
+    </div>` : `
+    <div style="background:var(--green-l);border:1px solid var(--green);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:var(--green);font-weight:600">
+      ✅ מיקום מצורף · דיוק ±${Math.round(currentLoc.coords.accuracy)}מ'
+    </div>`;
+
+  document.getElementById('sheet-body').innerHTML = `
+    ${nameWarning}
+    ${locWarning}
+
+    <div style="font-size:12px;color:var(--g600);font-weight:600;margin-bottom:6px">📝 תצוגה מקדימה של ההודעה:</div>
+    <div style="background:#dcf8c6;border:1px solid #b3d99a;border-radius:10px;padding:14px;margin-bottom:14px;font-size:13px;line-height:1.6;color:var(--g900);white-space:pre-wrap;font-family:'Heebo',-apple-system,sans-serif;direction:ltr;text-align:right" dir="rtl">${escHtml(msg)}</div>
+
+    <button onclick="sendSOSToGroup()" class="btn btn-success btn-full" style="padding:16px;font-size:15px;margin-bottom:8px">
+      📤 העתק ופתח את קבוצת החירום
+      <div style="font-size:11px;opacity:0.9;font-weight:500;margin-top:2px">לחץ Paste בוואטסאפ ושלח</div>
+    </button>
+
+    <div style="background:var(--blue-l);border:1px solid var(--blue);border-radius:8px;padding:10px 12px;margin-top:8px;font-size:11px;color:var(--blue-d);line-height:1.5">
+      <strong>📱 הוראות מהירות:</strong><br>
+      1. לחץ על הכפתור הירוק למעלה<br>
+      2. תיפתח קבוצת WhatsApp - היכנס אליה<br>
+      3. הקש ארוכות בתיבת הטקסט ובחר <strong>"הדבק"</strong> (Paste)<br>
+      4. לחץ על כפתור השליחה ➤
+    </div>
+
+    <button class="btn btn-ghost btn-full" onclick="closeSheet()" style="margin-top:12px">
+      ביטול
+    </button>
+  `;
+  document.getElementById('sheet-actions').style.display = 'none';
+  openSheet();
+}
+
+// Action when user clicks "Open the group" button - copy + open in same gesture
+async function sendSOSToGroup(){
+  const msg = buildSOSMessage();
+  // Copy to clipboard (must be inside user gesture for it to work on iOS)
+  let copied = false;
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(msg);
+      copied = true;
+    }
+  }catch(e){
+    // Fallback for older browsers / sandboxed contexts
+    try{
+      const ta = document.createElement('textarea');
+      ta.value = msg;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      copied = true;
+    }catch(e2){}
   }
-  // Don't preventDefault — let the browser follow the link naturally
-  return true;
+
+  if(copied){
+    toast('✅ ההודעה הועתקה - הדבק בקבוצה');
+  }
+  // Open WhatsApp group in new tab/window
+  // Mobile: this opens the WhatsApp app directly
+  // Desktop: opens WhatsApp Web in new tab
+  window.open(SOS_GROUP_URL, '_blank', 'noopener');
+  closeSheet();
+}
+
+function refreshLocationInline(){
+  refreshLocation();
+  toast('🔄 מבקש מיקום...');
+  // Re-open the sheet after a brief delay so the new location appears
+  setTimeout(()=>{
+    if(document.querySelector('.sheet').classList.contains('on')){
+      showSOSReadyToSend();
+    }
+  }, 1500);
+}
+
+// Legacy function name kept for backwards compatibility (in case anywhere else calls it)
+function prepareSOSWhatsApp(ev){
+  if(ev) ev.preventDefault();
+  showSOSReadyToSend();
+  return false;
 }
 async function saveSOSSettings(){
   const name = document.getElementById('sos-name').value.trim();
@@ -3574,38 +3664,31 @@ function showSOSActionsPanel(){
   document.getElementById('sheet-title').textContent='🚨 שליחת הודעת חירום';
 
   const locBadge = hasLocation
-    ? `<div style="background:var(--green-l);color:var(--green);padding:6px 10px;border-radius:6px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:4px;margin-top:6px">✅ מיקום זמין · דיוק ±${Math.round(currentLoc.coords.accuracy)}מ'</div>`
-    : `<div style="background:var(--amber-l);color:var(--amber);padding:6px 10px;border-radius:6px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:4px;margin-top:6px">⚠️ מיקום לא זמין — ההודעה תישלח בלי מיקום</div>`;
+    ? `<div style="background:var(--green-l);color:var(--green);padding:6px 10px;border-radius:6px;font-size:12px;font-weight:600;display:inline-block;margin-top:6px">✅ מיקום זמין · דיוק ±${Math.round(currentLoc.coords.accuracy)}מ'</div>`
+    : `<div style="background:var(--amber-l);color:var(--amber);padding:6px 10px;border-radius:6px;font-size:12px;font-weight:600;display:inline-block;margin-top:6px">⚠️ מיקום לא זמין — ההודעה תישלח בלי מיקום</div>`;
 
   document.getElementById('sheet-body').innerHTML = `
     <div style="background:var(--red-l);border:1px solid var(--red);border-radius:10px;padding:12px;margin-bottom:14px;font-size:13px;line-height:1.5;color:var(--red)">
-      <strong>התראת החירום הופעלה.</strong><br>
-      ההודעה הועתקה ללוח. שלח אותה לקבוצת החירום של המשלחת:
+      <strong>🚨 התראת החירום הופעלה!</strong>
       ${locBadge}
     </div>
 
-    <a href="${SOS_GROUP_URL}" target="_blank" rel="noopener" class="btn btn-success btn-full" onclick="copySOSToClipboard()" style="margin-bottom:8px;padding:16px;font-size:16px;text-decoration:none">
-      👥 שלח לקבוצת החירום
-      <div style="font-size:11px;opacity:0.9;font-weight:500;margin-top:2px">ההודעה מועתקת — הדבק בקבוצה ושלח</div>
-    </a>
+    <div style="font-size:12px;color:var(--g600);font-weight:600;margin-bottom:6px">📝 ההודעה שתישלח:</div>
+    <div style="background:#dcf8c6;border:1px solid #b3d99a;border-radius:10px;padding:14px;margin-bottom:14px;font-size:13px;line-height:1.6;color:var(--g900);white-space:pre-wrap;font-family:'Heebo',-apple-system,sans-serif" dir="rtl">${escHtml(msg)}</div>
+
+    <button onclick="sendSOSToGroup()" class="btn btn-success btn-full" style="margin-bottom:8px;padding:16px;font-size:16px">
+      📤 העתק ופתח את קבוצת החירום
+      <div style="font-size:11px;opacity:0.9;font-weight:500;margin-top:2px">לחץ Paste בוואטסאפ ושלח</div>
+    </button>
 
     ${hasLocation ? `<a href="${googleMapsUrl}" target="_blank" rel="noopener" class="btn btn-ghost btn-full" style="margin-bottom:8px;text-decoration:none">
       🗺️ הצג מיקום במפה
     </a>` : ''}
 
-    <button class="btn btn-ghost btn-full" onclick="copySOSMessage()" style="margin-bottom:8px">
-      📋 העתק את הודעת החירום שוב
-    </button>
-
     <div style="background:var(--amber-l);border:1px solid var(--amber);border-radius:8px;padding:10px;margin-top:10px;font-size:12px;color:#7a5600;line-height:1.5">
       <strong>📞 במקרה חירום אמיתי:</strong><br>
       פתח את אפליקציית הטלפון וחייג <strong>110</strong> (משטרת ברלין) או <strong>112</strong> (אמבולנס).
     </div>
-
-    <details style="margin-top:12px">
-      <summary style="font-size:12px;color:var(--g600);cursor:pointer;padding:4px">📝 תצוגה מקדימה של ההודעה</summary>
-      <pre style="white-space:pre-wrap;margin-top:8px;padding:10px;background:var(--g50);border-radius:8px;font-family:inherit;font-size:11px;color:var(--g900);line-height:1.5">${escHtml(msg)}</pre>
-    </details>
 
     <button class="btn btn-primary btn-full" onclick="closeSheetToHome()" style="margin-top:14px;padding:14px">
       🏠 סגור וחזור לדף הבית
