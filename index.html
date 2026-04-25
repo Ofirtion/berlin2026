@@ -108,6 +108,16 @@ textarea{resize:vertical;min-height:80px}
 .hero-dates{font-size:13px;opacity:0.9;margin-top:4px}
 .hero-greet{font-size:14px;margin-top:14px;background:rgba(255,255,255,0.18);padding:8px 16px;border-radius:20px;display:inline-block;backdrop-filter:blur(4px);font-weight:500}
 
+/* WORLD CLOCKS */
+.clocks-widget{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:14px;margin-bottom:14px;box-shadow:var(--shadow);display:flex;align-items:stretch;gap:10px}
+.clock-card{flex:1;display:flex;align-items:center;gap:10px;padding:6px}
+.clock-flag{font-size:32px;line-height:1;flex-shrink:0}
+.clock-info{flex:1;min-width:0}
+.clock-name{font-size:11px;color:var(--g600);font-weight:600;margin-bottom:2px}
+.clock-time{font-size:22px;font-weight:800;color:var(--g900);line-height:1;font-variant-numeric:tabular-nums;letter-spacing:0.5px}
+.clock-divider{display:flex;flex-direction:column;align-items:center;justify-content:center;border-right:1px dashed var(--g200);border-left:1px dashed var(--g200);padding:0 8px}
+.clock-diff{font-size:11px;color:var(--g600);font-weight:600;background:var(--g50);padding:3px 8px;border-radius:10px;white-space:nowrap}
+
 .today-strip{background:#fff;border:1px solid var(--g100);border-right:4px solid var(--blue);border-radius:var(--r);padding:14px;margin-bottom:14px;box-shadow:var(--shadow)}
 
 .weather-widget{background:linear-gradient(135deg,#4a90d9 0%,#2a7acc 100%);color:#fff;border-radius:var(--r);padding:14px;margin-bottom:14px;box-shadow:var(--shadow);overflow:hidden}
@@ -279,6 +289,23 @@ textarea{resize:vertical;min-height:80px}
 
 /* EXPENSES */
 .exp-summary{background:linear-gradient(135deg,var(--amber) 0%,#8a5a00 100%);color:#fff;border-radius:var(--r);padding:16px;margin-bottom:14px;box-shadow:var(--shadow)}
+
+/* CURRENCY CONVERTER */
+.conv-card{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:14px;margin-bottom:14px;box-shadow:var(--shadow)}
+.conv-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.conv-title{font-size:14px;font-weight:700;color:var(--g900)}
+.conv-rate{font-size:11px;color:var(--g600);background:var(--g50);padding:3px 8px;border-radius:10px}
+.conv-rate.live{background:var(--green-l);color:var(--green)}
+.conv-body{display:flex;align-items:flex-end;gap:6px}
+.conv-side{flex:1;min-width:0}
+.conv-side label{display:block;font-size:11px;color:var(--g600);font-weight:600;margin-bottom:4px}
+.conv-input-row{display:flex;gap:4px;align-items:stretch}
+.conv-input-row select{padding:8px 4px;border:1.5px solid var(--g200);border-radius:8px;font-size:13px;font-weight:600;background:#fff;font-family:inherit;width:75px;flex-shrink:0}
+.conv-input-row input{flex:1;min-width:0;padding:8px 10px;border:1.5px solid var(--g200);border-radius:8px;font-size:15px;font-family:inherit;font-weight:600;text-align:left}
+.conv-input-row input:focus{outline:none;border-color:var(--amber)}
+.conv-result{flex:1;min-width:0;padding:8px 10px;border:1.5px solid var(--g200);border-radius:8px;font-size:15px;font-weight:700;background:var(--g50);color:var(--amber);text-align:left;display:flex;align-items:center;justify-content:flex-start}
+.conv-swap{background:var(--amber);color:#fff;border:none;width:32px;height:32px;border-radius:50%;font-size:16px;cursor:pointer;flex-shrink:0;margin-bottom:1px;font-weight:700;font-family:inherit}
+.conv-swap:active{transform:scale(0.92)}
 .exp-sum-h{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
 .exp-sum-t{font-size:14px;font-weight:600;opacity:0.95}
 .exp-sum-sub{font-size:11px;opacity:0.85;margin-top:2px}
@@ -591,6 +618,27 @@ textarea{resize:vertical;min-height:80px}
 
   <div id="weather-widget" class="weather-widget" style="display:none"></div>
 
+  <!-- WORLD CLOCKS -->
+  <div class="clocks-widget">
+    <div class="clock-card">
+      <div class="clock-flag">🇮🇱</div>
+      <div class="clock-info">
+        <div class="clock-name">ישראל</div>
+        <div class="clock-time" id="clock-il">--:--</div>
+      </div>
+    </div>
+    <div class="clock-divider">
+      <div class="clock-diff" id="clock-diff">−1ש'</div>
+    </div>
+    <div class="clock-card">
+      <div class="clock-flag">🇩🇪</div>
+      <div class="clock-info">
+        <div class="clock-name">ברלין</div>
+        <div class="clock-time" id="clock-de">--:--</div>
+      </div>
+    </div>
+  </div>
+
   <div id="today-strip" class="today-strip" style="display:none"></div>
 
   <div class="nav-grid">
@@ -795,6 +843,41 @@ textarea{resize:vertical;min-height:80px}
     <div class="exp-sum-grid" id="exp-totals"></div>
   </div>
 
+  <!-- CURRENCY CONVERTER -->
+  <div class="conv-card">
+    <div class="conv-h">
+      <div class="conv-title">💱 ממיר מטבע</div>
+      <div class="conv-rate" id="conv-rate-info">טוען שער...</div>
+    </div>
+    <div class="conv-body">
+      <div class="conv-side">
+        <label>מ-</label>
+        <div class="conv-input-row">
+          <select id="conv-from" onchange="recalcConversion()">
+            <option value="EUR">€ EUR</option>
+            <option value="ILS">₪ ILS</option>
+            <option value="USD">$ USD</option>
+            <option value="GBP">£ GBP</option>
+          </select>
+          <input type="number" id="conv-amount" placeholder="100" step="0.01" min="0" inputmode="decimal" oninput="recalcConversion()">
+        </div>
+      </div>
+      <button class="conv-swap" onclick="swapConvCurrencies()" title="החלף">⇅</button>
+      <div class="conv-side">
+        <label>אל</label>
+        <div class="conv-input-row">
+          <select id="conv-to" onchange="recalcConversion()">
+            <option value="ILS">₪ ILS</option>
+            <option value="EUR">€ EUR</option>
+            <option value="USD">$ USD</option>
+            <option value="GBP">£ GBP</option>
+          </select>
+          <div class="conv-result" id="conv-result">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <button class="btn btn-primary btn-full" style="margin-bottom:14px;padding:14px;font-size:15px" onclick="openExpenseEditor()">
     ＋ הוסף הוצאה חדשה
   </button>
@@ -839,12 +922,12 @@ textarea{resize:vertical;min-height:80px}
     <div id="loc-hint" style="font-size:11px;color:var(--g600);margin-top:6px;display:none;line-height:1.4"></div>
   </div>
 
-  <a id="sos-wa-btn" href="#" class="btn btn-success btn-full" style="margin-bottom:14px;padding:14px;font-size:15px;text-decoration:none" onclick="prepareSOSWhatsApp(event)">💬 שלח הודעת חירום ב-WhatsApp</a>
+  <a id="sos-wa-btn" href="#" class="btn btn-success btn-full" style="margin-bottom:14px;padding:14px;font-size:15px;text-decoration:none" onclick="prepareSOSWhatsApp(event)">💬 שלח הודעת חירום לקבוצת המשלחת</a>
 
   <div style="background:var(--blue-l);border:1px solid var(--blue);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:var(--blue-d);line-height:1.5">
     <strong>💡 איך זה עובד:</strong><br>
-    אם הוגדרה קבוצת WhatsApp — ההודעה תועתק אוטומטית והקבוצה תיפתח (הדבק ושלח).<br>
-    אם לא — ההודעה תישלח ישירות לאיש הקשר שהגדרת.
+    הלחיצה על הכפתור פותחת את <strong>קבוצת החירום של המשלחת</strong> בוואטסאפ.<br>
+    ההודעה כוללת את <strong>שמך</strong> ואת <strong>המיקום הנוכחי</strong> שלך (אם אישרת מיקום) - הכל מוכן להדבקה ושליחה.
   </div>
 
   <div class="settings-card">
@@ -866,16 +949,6 @@ textarea{resize:vertical;min-height:80px}
     <div style="background:#fff;padding:8px 10px;border-radius:6px;margin-top:8px;font-size:11px;color:var(--g700);line-height:1.4">
       💡 פרטים אלו יישלחו לצוות המשלחת ויסייעו במקרה חירום
     </div>
-  </div>
-
-  <div class="settings-card">
-    <h3>⚙️ הגדרות SOS</h3>
-    <label>קישור לקבוצת WhatsApp (מומלץ — שליחה לקבוצה)</label>
-    <input type="url" id="sos-grp" placeholder="https://chat.whatsapp.com/...">
-    <label style="font-size:11px;color:var(--g600);font-weight:500;margin-top:-4px">📌 אם הקבוצה הוגדרה — ההודעה תישלח אליה כברירת מחדל</label>
-    <label style="margin-top:10px">מספר WhatsApp לחירום (גיבוי)</label>
-    <input type="tel" id="sos-num" placeholder="972501234567">
-    <label style="font-size:11px;color:var(--g600);font-weight:500;margin-top:-4px">📌 משמש כשאין קבוצה. עם קידומת, ללא +</label>
   </div>
 
   <button class="btn btn-primary btn-full" style="margin-top:10px;padding:14px;font-size:15px" onclick="saveSOSSettings()">💾 שמור את כל הפרטים</button>
@@ -1059,6 +1132,8 @@ textarea{resize:vertical;min-height:80px}
 <script>
 // ==================== DATA ====================
 const DRIVE_URL = 'https://drive.google.com/drive/folders/1B25Z583TOClY91nGGRSxkV2bCzbDNn0M';
+// FIXED emergency WhatsApp group for the delegation. Cannot be changed by users.
+const SOS_GROUP_URL = 'https://chat.whatsapp.com/DSzH7SzOHnvBXHwbGx31SI';
 
 const defaultSchedule = {
   sun: {
@@ -1355,8 +1430,69 @@ async function fetchAllRegistrations(){
   }
 }
 
+// Normalize phone number to digits only (last 9 = local Israeli number)
+function normPhone(p){
+  if(!p) return '';
+  const digits = String(p).replace(/[^0-9]/g,'');
+  // Take last 9 digits to handle country codes (972 prefix etc.)
+  return digits.length > 9 ? digits.slice(-9) : digits;
+}
+
+// Normalize a name for comparison: lowercase, remove extra spaces and common diacritics
+function normName(n){
+  if(!n) return '';
+  return String(n).trim().toLowerCase().replace(/\s+/g,' ').replace(/[״"'`]/g,'');
+}
+
+// Deduplicate registrations.
+// Two records are considered the same person if EITHER:
+//  - their phone numbers match (last 9 digits), OR
+//  - their normalized full name matches
+// When duplicates are found, the MORE COMPLETE one is kept (more filled fields).
+// If both equally complete, the MORE RECENT one wins.
+function dedupeRegistrations(regs){
+  if(!regs || !regs.length) return {clean:[], removed:[]};
+  const completeness = r => {
+    let score = 0;
+    if(r.fullName) score++;
+    if(r.phone) score++;
+    if(r.emerName) score++;
+    if(r.emerPhone) score++;
+    if(r.returnDate) score++;
+    return score;
+  };
+  // Sort by completeness desc, then by recency desc — best first
+  const sorted = [...regs].sort((a,b)=>{
+    const c = completeness(b) - completeness(a);
+    if(c !== 0) return c;
+    return (b.registeredAt||'').localeCompare(a.registeredAt||'');
+  });
+
+  const clean = [];
+  const removed = [];
+  const seenPhones = new Set();
+  const seenNames = new Set();
+
+  for(const r of sorted){
+    const phone = normPhone(r.phone);
+    const name = normName(r.fullName);
+    const phoneDup = phone && seenPhones.has(phone);
+    const nameDup = name && seenNames.has(name);
+    if(phoneDup || nameDup){
+      removed.push(r);
+    } else {
+      clean.push(r);
+      if(phone) seenPhones.add(phone);
+      if(name) seenNames.add(name);
+    }
+  }
+  return {clean, removed};
+}
+
 async function refreshRegistrations(){
-  const regs = await fetchAllRegistrations();
+  const allRegs = await fetchAllRegistrations();
+  // Sort alphabetically by Hebrew name
+  const regs = [...allRegs].sort((a,b)=>(a.fullName||'').localeCompare(b.fullName||'','he'));
   const box = document.getElementById('reg-list');
   const stat = document.getElementById('reg-stat-count');
   if(stat) stat.textContent = regs.length;
@@ -1370,16 +1506,35 @@ async function refreshRegistrations(){
     return;
   }
 
-  box.innerHTML = regs.map(r=>{
+  // Identify duplicates so we can mark them visually (without removing - admin decides)
+  const {clean, removed} = dedupeRegistrations(regs);
+  const duplicateUids = new Set(removed.map(r=>r.uid));
+  const dupCount = removed.length;
+
+  // Show banner with dedup info + bulk-delete option
+  const banner = dupCount ? `
+    <div style="background:#fff8e1;border:1px solid #d4a300;border-radius:8px;padding:10px 12px;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <div style="font-size:12px;color:#8a6800;line-height:1.4">
+        ⚠️ זוהו <strong>${dupCount}</strong> רשומות כפולות (לפי שם או טלפון).<br>
+        <span style="font-size:11px">בדו"ח/ייצוא יוסרו אוטומטית. כאן הן מסומנות.</span>
+      </div>
+      <button onclick="bulkDeleteDuplicates()" style="background:#d4a300;color:#fff;border:none;padding:8px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;flex-shrink:0">🗑️ מחק כפילויות</button>
+    </div>
+  ` : '';
+
+  box.innerHTML = banner + regs.map(r=>{
+    const isDup = duplicateUids.has(r.uid);
+    const dupBadge = isDup ? '<span style="background:#fff8e1;color:#8a6800;font-size:10px;font-weight:700;padding:2px 6px;border-radius:10px;margin-right:6px">⚠️ כפילות</span>' : '';
+    const cardStyle = isDup ? 'opacity:0.7;border-right:3px solid #d4a300' : '';
     const name = r.fullName || '(ללא שם)';
     const initial = (r.fullName || '?').charAt(0).toUpperCase();
     const regDate = r.registeredAt ? new Date(r.registeredAt).toLocaleDateString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
     const retDate = r.returnDate ? new Date(r.returnDate).toLocaleDateString('he-IL',{day:'2-digit',month:'2-digit'}) : '?';
-    return `<div class="reg-row">
+    return `<div class="reg-row" style="${cardStyle}">
       <div class="reg-row-h">
         <div class="reg-avatar">${escHtml(initial)}</div>
         <div class="reg-info">
-          <div class="reg-nm">${escHtml(name)}</div>
+          <div class="reg-nm">${dupBadge}${escHtml(name)}</div>
           <div class="reg-sub">${escHtml(regDate)}</div>
         </div>
         <div class="reg-acts">
@@ -1396,6 +1551,27 @@ async function refreshRegistrations(){
   }).join('');
 }
 
+// Delete all duplicate registrations at once (kept the "best" copy from each group)
+async function bulkDeleteDuplicates(){
+  const allRegs = await fetchAllRegistrations();
+  const {removed} = dedupeRegistrations(allRegs);
+  if(!removed.length){ toast('אין כפילויות למחיקה'); return; }
+  if(!confirm(`למחוק ${removed.length} רשומות כפולות?\n\nהמערכת תשמור את הרשומה השלמה ביותר מכל קבוצה.\n(הפעולה לא ניתנת לביטול)`)) return;
+
+  let success = 0, failed = 0;
+  for(const r of removed){
+    try{
+      await window.fbDB.set('registrations/' + r.uid, null);
+      success++;
+    }catch(e){
+      failed++;
+    }
+  }
+  refreshRegistrations();
+  if(failed) toast(`✅ נמחקו ${success}, נכשלו ${failed}`,'err');
+  else toast(`✅ נמחקו ${success} רשומות כפולות`);
+}
+
 async function deleteRegistration(uid, name){
   if(!confirm(`למחוק את הרישום של ${name}?\n(הפעולה לא ניתנת לביטול)`)) return;
   try{
@@ -1408,8 +1584,12 @@ async function deleteRegistration(uid, name){
 }
 
 function exportRegistrations(){
-  fetchAllRegistrations().then(regs=>{
-    if(!regs.length){ toast('אין רישומים לייצוא','err'); return; }
+  fetchAllRegistrations().then(allRegs=>{
+    if(!allRegs.length){ toast('אין רישומים לייצוא','err'); return; }
+    // Deduplicate before exporting
+    const {clean, removed} = dedupeRegistrations(allRegs);
+    // Sort alphabetically by Hebrew name
+    const regs = [...clean].sort((a,b)=>(a.fullName||'').localeCompare(b.fullName||'','he'));
     const rows = [['שם מלא','טלפון','איש קשר חירום','טלפון איש קשר','תאריך חזרה','תאריך הרשמה']];
     regs.forEach(r=>{
       rows.push([
@@ -1427,7 +1607,11 @@ function exportRegistrations(){
     a.href = URL.createObjectURL(blob);
     a.download = 'berlin2026_registrations_'+new Date().toISOString().slice(0,10)+'.csv';
     a.click();
-    toast('✅ הקובץ הורד');
+    if(removed.length){
+      toast(`✅ הקובץ הורד (${regs.length} רשומים, ${removed.length} כפילויות הוסרו)`);
+    } else {
+      toast('✅ הקובץ הורד');
+    }
   });
 }
 
@@ -1567,17 +1751,26 @@ function openPrintPreview(title, bodyHtml, accentColor){
 }
 
 function printRegistrations(){
-  fetchAllRegistrations().then(regs=>{
-    if(!regs.length){ toast('אין רישומים להדפסה','err'); return; }
+  fetchAllRegistrations().then(allRegs=>{
+    if(!allRegs.length){ toast('אין רישומים להדפסה','err'); return; }
+    // Deduplicate before printing
+    const {clean, removed} = dedupeRegistrations(allRegs);
     const today = new Date().toLocaleDateString('he-IL');
-    const sorted = [...regs].sort((a,b)=>(a.fullName||'').localeCompare(b.fullName||'','he'));
+    const sorted = [...clean].sort((a,b)=>(a.fullName||'').localeCompare(b.fullName||'','he'));
+
+    const dedupNote = removed.length ? `
+      <div style="background:#fff8e1;border:1px solid #d4a300;border-radius:8px;padding:8px 12px;margin-bottom:14px;font-size:12px;color:#8a6800">
+        💡 הוסרו <strong>${removed.length}</strong> רשומות כפולות אוטומטית (לפי שם או טלפון זהה). מקור: ${allRegs.length} רשומות → ${clean.length} ייחודיות.
+      </div>` : '';
 
     const bodyHtml = `
       <div class="header">
         <div class="emoji">🇩🇪✈️</div>
         <h1>דו"ח משתתפי משלחת — ברלין 2026</h1>
-        <div class="meta">${escHtml(today)} · ${regs.length} משתתפים</div>
+        <div class="meta">${escHtml(today)} · ${clean.length} משתתפים</div>
       </div>
+
+      ${dedupNote}
 
       <table>
         <thead>
@@ -1644,6 +1837,89 @@ function doCopyRegLink(){
     ()=>{ toast('✅ הקישור הועתק'); closeSheet(); },
     ()=>toast('❌ שגיאה בהעתקה','err')
   );
+}
+
+// ==================== CURRENCY CONVERTER ====================
+// Default fallback rates (relative to EUR) — used if the API call fails.
+// These are approximate Apr 2026 rates; user will see real-time rates if online.
+const FALLBACK_RATES = {
+  EUR: 1.0,
+  USD: 1.07,
+  ILS: 4.05,
+  GBP: 0.85
+};
+let currentRates = {...FALLBACK_RATES};
+let ratesUpdated = null;
+
+async function fetchExchangeRates(){
+  // Use exchangerate-api.com (open, no key required for the basic endpoint)
+  // Falls back gracefully to FALLBACK_RATES if the call fails (e.g. offline).
+  try{
+    const cached = lsGet('berlin_rates_cache', null);
+    // Use cached rates if less than 6 hours old
+    if(cached && cached.ts && (Date.now() - cached.ts) < 6*60*60*1000){
+      currentRates = cached.rates;
+      ratesUpdated = new Date(cached.ts);
+      updateRateInfo(true);
+      return;
+    }
+    const res = await fetch('https://open.er-api.com/v6/latest/EUR');
+    if(!res.ok) throw new Error('rates fetch failed');
+    const data = await res.json();
+    if(data && data.rates){
+      currentRates = {
+        EUR: 1.0,
+        USD: data.rates.USD || FALLBACK_RATES.USD,
+        ILS: data.rates.ILS || FALLBACK_RATES.ILS,
+        GBP: data.rates.GBP || FALLBACK_RATES.GBP
+      };
+      ratesUpdated = new Date();
+      lsSet('berlin_rates_cache', {rates: currentRates, ts: Date.now()});
+      updateRateInfo(true);
+    }
+  }catch(e){
+    console.warn('exchange rates fetch failed, using fallback:', e);
+    updateRateInfo(false);
+  }
+}
+
+function updateRateInfo(live){
+  const el = document.getElementById('conv-rate-info');
+  if(!el) return;
+  const rateEurIls = currentRates.ILS / currentRates.EUR;
+  if(live){
+    el.classList.add('live');
+    el.textContent = `€1 = ₪${rateEurIls.toFixed(3)} • זמן אמת`;
+  } else {
+    el.classList.remove('live');
+    el.textContent = `€1 ≈ ₪${rateEurIls.toFixed(2)} • שער מקורב`;
+  }
+}
+
+function recalcConversion(){
+  const fromCur = document.getElementById('conv-from').value;
+  const toCur = document.getElementById('conv-to').value;
+  const amount = parseFloat(document.getElementById('conv-amount').value);
+  const resultEl = document.getElementById('conv-result');
+  if(!resultEl) return;
+  if(isNaN(amount) || amount <= 0){
+    resultEl.textContent = '—';
+    return;
+  }
+  // Convert through EUR as base: amount * (toRate / fromRate)
+  const eurAmount = amount / (currentRates[fromCur] || 1);
+  const converted = eurAmount * (currentRates[toCur] || 1);
+  const symbol = CURRENCY_SYMBOLS[toCur] || toCur;
+  resultEl.textContent = `${symbol}${converted.toFixed(2)}`;
+}
+
+function swapConvCurrencies(){
+  const fromEl = document.getElementById('conv-from');
+  const toEl = document.getElementById('conv-to');
+  const tmp = fromEl.value;
+  fromEl.value = toEl.value;
+  toEl.value = tmp;
+  recalcConversion();
 }
 
 // ==================== EXPENSES ====================
@@ -2034,14 +2310,14 @@ async function syncUserProfile(){
   if(!window.fbDB || isOfflineCopy) return;
   const uid = getUserId();
   const name = lsGet('sos_name','') || '';
-  const sosNum = lsGet('sos_num','') || '';
+  const myPhone = lsGet('sos_myphone','') || '';
   const itzikNum = lsGet('itzik_num','') || '';
   const firstSeen = localStorage.getItem('berlin_uid_first') || new Date().toISOString();
 
   const profile = {
     uid,
     name: name || null,
-    hasSosNum: !!sosNum,
+    hasSosNum: !!myPhone,
     hasItzik: !!itzikNum,
     firstSeen,
     lastSeen: new Date().toISOString(),
@@ -2280,8 +2556,6 @@ function loadLocal(){
   reflections = lsGet('berlin_reflections',[]);
   // Load all SOS / personal fields
   document.getElementById('sos-name').value = lsGet('sos_name','')||'';
-  document.getElementById('sos-num').value = lsGet('sos_num','')||'';
-  document.getElementById('sos-grp').value = lsGet('sos_grp','')||'';
   // Extended fields (added later)
   const myPhoneEl = document.getElementById('sos-myphone');
   const returnEl = document.getElementById('sos-return');
@@ -2311,7 +2585,14 @@ function goPage(p){
   if(p==='home') renderHome();
   if(p==='schedule') renderSchedule();
   if(p==='reflect'){ renderRefDays(); renderReflections(); }
-  if(p==='expenses') renderExpenses();
+  if(p==='expenses'){
+    renderExpenses();
+    updateRateInfo(!!ratesUpdated);
+    // Pre-fill amount with 100 if empty so user sees a real conversion
+    const amtEl = document.getElementById('conv-amount');
+    if(amtEl && !amtEl.value){ amtEl.value = '100'; }
+    recalcConversion();
+  }
   if(p==='admin'){ if(isAdminLogged()) showAdminPanel(); else showAdminLogin(); }
 }
 
@@ -2495,6 +2776,33 @@ function retryWeather(){
 }
 
 // ==================== HOME ====================
+// Update Israel + Germany clocks on home page. Self-scheduling every 30s.
+let clocksInterval = null;
+function updateClocks(){
+  try{
+    const now = new Date();
+    // Use Intl.DateTimeFormat for accurate timezone conversion (handles DST automatically)
+    const fmt = (tz)=> new Intl.DateTimeFormat('he-IL',{
+      hour:'2-digit', minute:'2-digit', hour12:false, timeZone:tz
+    }).format(now);
+    const ilEl = document.getElementById('clock-il');
+    const deEl = document.getElementById('clock-de');
+    const diffEl = document.getElementById('clock-diff');
+    if(ilEl) ilEl.textContent = fmt('Asia/Jerusalem');
+    if(deEl) deEl.textContent = fmt('Europe/Berlin');
+    // Compute hour difference (Israel is usually 1h ahead of Berlin)
+    if(diffEl){
+      const ilHour = parseInt(fmt('Asia/Jerusalem').split(':')[0],10);
+      const deHour = parseInt(fmt('Europe/Berlin').split(':')[0],10);
+      let diff = ilHour - deHour;
+      // Handle day boundary (e.g. IL is 00:30 and DE is 23:30)
+      if(diff < -12) diff += 24;
+      if(diff > 12) diff -= 24;
+      diffEl.textContent = diff > 0 ? `IL +${diff}ש'` : (diff < 0 ? `IL ${diff}ש'` : 'אותה שעה');
+    }
+  }catch(e){}
+}
+
 function renderHome(){
   const h = new Date().getHours();
   let g = 'שלום';
@@ -2503,6 +2811,12 @@ function renderHome(){
   else if(h<21) g='🌇 ערב טוב';
   else g='🌙 לילה טוב';
   document.getElementById('greet').textContent = g;
+
+  // Update clocks immediately and start auto-refresh
+  updateClocks();
+  if(!clocksInterval){
+    clocksInterval = setInterval(updateClocks, 30000); // refresh every 30s
+  }
 
   const tk = todayKey();
   const strip = document.getElementById('today-strip');
@@ -2995,38 +3309,21 @@ function buildSOSMessage(){
 // This handler sets the href right before the browser follows the link —
 // all inside the SAME user click event, which browsers always honor.
 //
-// Priority: if a group link is configured, send there (more eyes = faster help).
-// Fallback: if no group, send to the personal contact number.
+// The destination is always the FIXED delegation emergency group (SOS_GROUP_URL).
+// The message is auto-copied to clipboard so the user just pastes & sends.
 function prepareSOSWhatsApp(ev){
-  const grp = lsGet('sos_grp','').trim();
-  const num = lsGet('sos_num','').replace(/[^0-9]/g,'');
-  const msg = encodeURIComponent(buildSOSMessage());
+  // Auto-copy the SOS message to clipboard so user can paste in the group
+  try{
+    const plainMsg = buildSOSMessage();
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(plainMsg).catch(()=>{});
+    }
+  }catch(e){}
 
-  let url = '';
-  if(grp){
-    // Send to group — append message via wa.me text param if it's a wa.me link,
-    // otherwise just open the group (user can paste). Most WhatsApp invite links
-    // don't accept ?text=, so we copy the message to clipboard as a backup.
-    url = grp;
-    // Copy message to clipboard so user can paste in the group
-    try{
-      const plainMsg = buildSOSMessage();
-      if(navigator.clipboard && navigator.clipboard.writeText){
-        navigator.clipboard.writeText(plainMsg).catch(()=>{});
-      }
-    }catch(e){}
-  } else if(num){
-    url = `https://wa.me/${num}?text=${msg}`;
-  } else {
-    ev.preventDefault();
-    toast('✋ הגדר קבוצת WhatsApp או מספר איש קשר בהגדרות','err');
-    return false;
-  }
-
-  // Update the anchor's href so the native click behavior opens the correct URL
+  // Update the anchor's href to the fixed group URL
   const el = document.getElementById('sos-wa-btn');
   if(el){
-    el.href = url;
+    el.href = SOS_GROUP_URL;
     el.target = '_blank';
     el.rel = 'noopener';
   }
@@ -3039,8 +3336,6 @@ async function saveSOSSettings(){
   const returnDate = document.getElementById('sos-return').value;
   const emerName = document.getElementById('sos-emer-name').value.trim();
   const emerPhone = document.getElementById('sos-emer-phone').value.trim();
-  const grp = document.getElementById('sos-grp').value.trim();
-  const num = document.getElementById('sos-num').value.trim();
 
   // Save all to localStorage
   lsSet('sos_name', name);
@@ -3048,19 +3343,17 @@ async function saveSOSSettings(){
   lsSet('sos_return', returnDate);
   lsSet('sos_emer_name', emerName);
   lsSet('sos_emer_phone', emerPhone);
-  lsSet('sos_grp', grp);
-  lsSet('sos_num', num);
 
   // If user has filled the basics, save as registration to Firebase too
   // so the admin can see them in the registrations list
-  if(name && (myPhone || num) && emerName && emerPhone){
+  if(name && myPhone && emerName && emerPhone){
     try{
       if(window.fbDB){
         const uid = getUserId();
         const reg = {
           uid,
           fullName: name,
-          phone: myPhone || num,
+          phone: myPhone,
           emerName,
           emerPhone,
           returnDate: returnDate || null,
@@ -3274,10 +3567,6 @@ async function triggerCD(){
 
 function showSOSActionsPanel(){
   const msg = buildSOSMessage();
-  const num = lsGet('sos_num','').replace(/[^0-9]/g,'');
-  const grp = lsGet('sos_grp','');
-  const waUrl = num ? `https://wa.me/${num}?text=${encodeURIComponent(msg)}` : '';
-  const grpUrl = grp || '';
   const hasLocation = !!currentLoc;
   const googleMapsUrl = currentLoc ? `https://maps.google.com/?q=${currentLoc.coords.latitude.toFixed(5)},${currentLoc.coords.longitude.toFixed(5)}` : '';
 
@@ -3291,27 +3580,21 @@ function showSOSActionsPanel(){
   document.getElementById('sheet-body').innerHTML = `
     <div style="background:var(--red-l);border:1px solid var(--red);border-radius:10px;padding:12px;margin-bottom:14px;font-size:13px;line-height:1.5;color:var(--red)">
       <strong>התראת החירום הופעלה.</strong><br>
-      ${grpUrl?'ההודעה הועתקה ללוח. שלח אותה לקבוצה או לאיש קשר:':'שלח את ההודעה דרך אחת מהכתובות:'}
+      ההודעה הועתקה ללוח. שלח אותה לקבוצת החירום של המשלחת:
       ${locBadge}
     </div>
 
-    ${grpUrl ? `<a href="${grpUrl}" target="_blank" rel="noopener" class="btn btn-success btn-full" onclick="copySOSToClipboard()" style="margin-bottom:8px;padding:16px;font-size:16px;text-decoration:none">
-      👥 שלח לקבוצת WhatsApp
-      <div style="font-size:11px;opacity:0.9;font-weight:500;margin-top:2px">ההודעה תועתק — הדבק בקבוצה</div>
-    </a>` : ''}
-
-    ${waUrl ? `<a href="${waUrl}" target="_blank" rel="noopener" class="btn ${grpUrl?'btn-ghost':'btn-success'} btn-full" style="margin-bottom:8px;padding:${grpUrl?'12px':'16px'};font-size:${grpUrl?'14px':'16px'};text-decoration:none">
-      💬 ${grpUrl?'או שלח לאיש קשר אישי':'שלח WhatsApp לאיש קשר'}
-    </a>` : (!grpUrl ? `<div style="background:var(--amber-l);padding:10px;border-radius:8px;margin-bottom:8px;font-size:13px;color:#7a5600">
-      ⚠️ לא הוגדר מספר WhatsApp. עבור להגדרות SOS להוסיף.
-    </div>` : '')}
+    <a href="${SOS_GROUP_URL}" target="_blank" rel="noopener" class="btn btn-success btn-full" onclick="copySOSToClipboard()" style="margin-bottom:8px;padding:16px;font-size:16px;text-decoration:none">
+      👥 שלח לקבוצת החירום
+      <div style="font-size:11px;opacity:0.9;font-weight:500;margin-top:2px">ההודעה מועתקת — הדבק בקבוצה ושלח</div>
+    </a>
 
     ${hasLocation ? `<a href="${googleMapsUrl}" target="_blank" rel="noopener" class="btn btn-ghost btn-full" style="margin-bottom:8px;text-decoration:none">
       🗺️ הצג מיקום במפה
     </a>` : ''}
 
     <button class="btn btn-ghost btn-full" onclick="copySOSMessage()" style="margin-bottom:8px">
-      📋 העתק את הודעת החירום
+      📋 העתק את הודעת החירום שוב
     </button>
 
     <div style="background:var(--amber-l);border:1px solid var(--amber);border-radius:8px;padding:10px;margin-top:10px;font-size:12px;color:#7a5600;line-height:1.5">
@@ -3891,6 +4174,8 @@ async function init(){
 
   try{ loadLocal(); }catch(e){ console.error('[init] loadLocal failed:', e); }
   try{ loadExpenses(); }catch(e){ console.error('[init] loadExpenses failed:', e); }
+  // Fetch exchange rates in background (non-blocking)
+  fetchExchangeRates().catch(()=>{});
 
   // If running as offline copy, skip cloud loading
   if(isOfflineCopy){
