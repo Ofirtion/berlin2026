@@ -547,8 +547,13 @@ textarea{resize:vertical;min-height:80px}
         </button>
 
         <div style="font-size:11px;color:var(--g600);text-align:center;margin-top:14px;line-height:1.5">
-          🔒 הפרטים נשמרים בצורה מאובטחת בענן ומשמשים את צוות הניהול בלבד למקרי חירום.
+          <span onclick="secretSkipTap()" style="cursor:pointer;user-select:none;-webkit-user-select:none">🔒</span> הפרטים נשמרים בצורה מאובטחת בענן ומשמשים את צוות הניהול בלבד למקרי חירום.
         </div>
+
+        <!-- Hidden skip button revealed after 5 taps on the lock emoji above -->
+        <button id="reg-skip-btn" onclick="skipRegistration()" style="display:none;width:100%;margin-top:14px;background:transparent;color:var(--g600);border:1px dashed var(--g300);padding:10px;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer">
+          ⏭️ דלג על ההרשמה (מצב אדמין)
+        </button>
       </div>
     </div>
 
@@ -1271,6 +1276,11 @@ async function checkAndShowRegistration(){
 
 function showRegistrationForm(){
   console.log('[Registration] Showing form, isLocallyRegistered:', isLocallyRegistered(), 'isRegisterUrl:', isRegisterUrl());
+  // Reset secret tap counter each time the form is shown
+  secretTapCount = 0;
+  secretTapTimer = null;
+  const skipBtn = document.getElementById('reg-skip-btn');
+  if(skipBtn) skipBtn.style.display = 'none';
   const overlay = document.getElementById('reg-overlay');
   if(!overlay){
     console.error('[Registration] reg-overlay element not found in DOM!');
@@ -1399,6 +1409,36 @@ async function submitRegistration(){
     console.warn('registration failed', err);
     showRegError('❌ שגיאה בשמירה. נסה שוב.');
   }
+}
+
+// ----- HIDDEN SKIP REGISTRATION (admin only) -----
+// Tap the lock emoji 5 times within 3 seconds to reveal the skip button.
+let secretTapCount = 0;
+let secretTapTimer = null;
+function secretSkipTap(){
+  secretTapCount++;
+  // Reset the counter if user is too slow between taps
+  if(secretTapTimer) clearTimeout(secretTapTimer);
+  secretTapTimer = setTimeout(()=>{ secretTapCount = 0; }, 3000);
+
+  if(secretTapCount >= 5){
+    const skipBtn = document.getElementById('reg-skip-btn');
+    if(skipBtn){
+      skipBtn.style.display = 'block';
+      // Subtle feedback so admin knows it worked
+      toast('🔓 מצב אדמין זמין');
+    }
+    secretTapCount = 0;
+  }
+}
+
+// Skip registration entirely - mark as registered locally without saving anything to cloud.
+// This is for admin/debug use only.
+function skipRegistration(){
+  if(!confirm('לדלג על ההרשמה?\n\nשים לב: הפרטים שלך לא יישמרו במאגר המשתתפים.\nאפשר תמיד להירשם אחר כך דרך דף החירום (SOS).')) return;
+  localStorage.setItem('berlin_registered', '1');
+  toast('⏭️ דילגנו על ההרשמה');
+  enterApp();
 }
 
 function enterApp(){
