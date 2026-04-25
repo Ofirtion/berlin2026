@@ -123,6 +123,7 @@ textarea{resize:vertical;min-height:80px}
 .nav-card.r{border-top:3px solid var(--red)}
 .nav-card.g{border-top:3px solid var(--green)}
 .nav-card.p{border-top:3px solid var(--purple)}
+.nav-card.a{border-top:3px solid var(--amber)}
 
 .sos-strip{background:linear-gradient(135deg,var(--red) 0%,#8e2a1f 100%);color:#fff;border-radius:var(--r);padding:16px;display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;box-shadow:0 4px 12px rgba(192,57,43,0.3)}
 .sos-strip .tx{display:flex;align-items:center;gap:10px;font-weight:600}
@@ -243,6 +244,47 @@ textarea{resize:vertical;min-height:80px}
 .settings-card{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:14px;box-shadow:var(--shadow);margin-bottom:12px}
 .settings-card h3{font-size:14px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:6px}
 .settings-card label{display:block;font-size:12px;font-weight:600;color:var(--g600);margin:8px 0 4px 0}
+
+/* EXPENSES */
+.exp-summary{background:linear-gradient(135deg,var(--amber) 0%,#8a5a00 100%);color:#fff;border-radius:var(--r);padding:16px;margin-bottom:14px;box-shadow:var(--shadow)}
+.exp-sum-h{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
+.exp-sum-t{font-size:14px;font-weight:600;opacity:0.95}
+.exp-sum-sub{font-size:11px;opacity:0.85;margin-top:2px}
+.exp-sum-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:8px}
+.exp-sum-cell{background:rgba(255,255,255,0.18);padding:10px 8px;border-radius:8px;text-align:center}
+.exp-sum-cell .c{font-size:11px;opacity:0.9;font-weight:600;margin-bottom:2px}
+.exp-sum-cell .v{font-size:18px;font-weight:800;line-height:1.1}
+
+.exp-card{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:12px 14px;margin-bottom:8px;box-shadow:var(--shadow);display:flex;gap:10px;align-items:flex-start}
+.exp-card .thumb{width:52px;height:52px;border-radius:8px;background:var(--g100);overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:24px;color:var(--g400);cursor:pointer}
+.exp-card .thumb img{width:100%;height:100%;object-fit:cover}
+.exp-card .info{flex:1;min-width:0}
+.exp-card .ttl{font-weight:600;font-size:14px;line-height:1.3;color:var(--g900)}
+.exp-card .meta{font-size:11px;color:var(--g600);margin-top:3px;display:flex;flex-wrap:wrap;gap:6px}
+.exp-card .meta span{display:inline-flex;align-items:center;gap:2px}
+.exp-card .right{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0}
+.exp-card .amt{font-weight:800;font-size:15px;color:var(--amber);white-space:nowrap}
+.exp-card .acts{display:flex;gap:4px}
+.exp-card .acts button{width:26px;height:26px;border-radius:6px;background:var(--g50);font-size:12px;display:flex;align-items:center;justify-content:center}
+
+.curr-pick{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px}
+.curr-pick button{padding:10px 6px;border:2px solid var(--g200);border-radius:var(--rs);background:#fff;font-size:13px;font-weight:700;color:var(--g600)}
+.curr-pick button.on{background:var(--amber);color:#fff;border-color:var(--amber)}
+
+.cat-pick{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.cat-pick button{padding:6px 12px;border:1.5px solid var(--g200);border-radius:18px;background:#fff;font-size:12px;font-weight:600;color:var(--g600)}
+.cat-pick button.on{background:var(--blue);color:#fff;border-color:var(--blue)}
+
+.receipt-preview{margin-top:8px;border-radius:8px;overflow:hidden;position:relative;max-height:200px;background:var(--g100);display:none}
+.receipt-preview.on{display:block}
+.receipt-preview img{width:100%;max-height:200px;object-fit:contain;display:block}
+.receipt-preview .rm{position:absolute;top:6px;left:6px;width:28px;height:28px;border-radius:50%;background:rgba(0,0,0,0.6);color:#fff;font-size:14px}
+
+@media print{
+  body>*:not(#exp-print){display:none!important}
+  #exp-print,#exp-print *{display:revert}
+  .bnav,.hdr,.no-print,.bc-overlay,.sheet-overlay,.sheet{display:none!important}
+}
 
 /* ADMIN */
 .stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:4px}
@@ -429,6 +471,9 @@ textarea{resize:vertical;min-height:80px}
     <a class="nav-card p" onclick="goPage('reflect')">
       <div class="ic">📝</div><div class="lb">רפלקציה</div>
     </a>
+    <a class="nav-card a" onclick="goPage('expenses')" style="grid-column:span 2">
+      <div class="ic">💶</div><div class="lb">הוצאות וקבלות</div>
+    </a>
   </div>
 
   <div class="sos-strip" onclick="goPage('sos')">
@@ -605,6 +650,29 @@ textarea{resize:vertical;min-height:80px}
   </div>
 </section>
 
+<!-- EXPENSES PAGE -->
+<section id="page-expenses" class="page">
+  <div class="exp-summary">
+    <div class="exp-sum-h">
+      <div class="exp-sum-t">💶 סה"כ הוצאות</div>
+      <div class="exp-sum-sub" id="exp-count">0 רשומות</div>
+    </div>
+    <div class="exp-sum-grid" id="exp-totals"></div>
+  </div>
+
+  <button class="btn btn-primary btn-full" style="margin-bottom:14px;padding:14px;font-size:15px" onclick="openExpenseEditor()">
+    ＋ הוסף הוצאה חדשה
+  </button>
+
+  <div style="display:flex;gap:6px;margin-bottom:12px">
+    <button class="btn btn-ghost" style="flex:1;padding:8px;font-size:12px" onclick="exportExpenses()">📊 ייצא CSV</button>
+    <button class="btn btn-ghost" style="flex:1;padding:8px;font-size:12px" onclick="printExpenses()">🖨️ הדפס דו"ח</button>
+  </div>
+
+  <h2 class="section-title">📋 ההוצאות שלי</h2>
+  <div id="exp-list"></div>
+</section>
+
 <!-- SOS PAGE -->
 <section id="page-sos" class="page">
   <div class="sos-wrap">
@@ -748,7 +816,7 @@ textarea{resize:vertical;min-height:80px}
   <button class="bnav-btn on" data-page="home" onclick="goPage('home')"><span class="ic">🏠</span>בית</button>
   <button class="bnav-btn" data-page="schedule" onclick="goPage('schedule')"><span class="ic">📅</span>לו"ז</button>
   <button class="bnav-btn" data-page="security" onclick="goPage('security')"><span class="ic">🛡️</span>ביטחון</button>
-  <button class="bnav-btn" data-page="reflect" onclick="goPage('reflect')"><span class="ic">📝</span>רפלקציה</button>
+  <button class="bnav-btn" data-page="expenses" onclick="goPage('expenses')"><span class="ic">💶</span>הוצאות</button>
   <button class="bnav-btn sos-nav" data-page="sos" onclick="goPage('sos')"><span class="ic">🚨</span>SOS</button>
   <button class="bnav-btn" data-page="admin" onclick="goPage('admin')"><span class="ic">⚙️</span>אדמין</button>
 </nav>
@@ -790,6 +858,9 @@ textarea{resize:vertical;min-height:80px}
 
 <!-- REPORT (PRINT) -->
 <section id="report-page" class="page"></section>
+
+<!-- EXPENSES PRINT -->
+<section id="exp-print" style="display:none"></section>
 
 <script>
 // ==================== DATA ====================
@@ -889,6 +960,387 @@ let broadcastQueue = [];
 let currentSheetType = '';
 let cloudAvailable = false;
 let fbUnsubscribers = [];
+
+// ==================== EXPENSES ====================
+const EXPENSE_CATEGORIES = [
+  {id:'food', label:'🍽️ אוכל', color:'var(--amber)'},
+  {id:'transport', label:'🚕 תחבורה', color:'var(--blue)'},
+  {id:'lodging', label:'🏨 לינה', color:'var(--purple)'},
+  {id:'gifts', label:'🎁 מתנות', color:'var(--red)'},
+  {id:'office', label:'📎 ציוד', color:'var(--green)'},
+  {id:'misc', label:'📌 שונות', color:'var(--g600)'}
+];
+
+const CURRENCIES = ['EUR','USD','ILS','GBP'];
+const CURRENCY_SYMBOLS = {EUR:'€', USD:'$', ILS:'₪', GBP:'£'};
+
+let expenses = [];
+let currentExpenseEdit = null;
+let currentExpenseCurrency = 'EUR';
+let currentExpenseCategory = 'food';
+let currentExpenseReceipt = null;
+
+function loadExpenses(){
+  expenses = lsGet('berlin_expenses', []) || [];
+}
+
+function getCurrentUserId(){
+  return getUserId();
+}
+
+function renderExpenses(){
+  const list = document.getElementById('exp-list');
+  const totals = document.getElementById('exp-totals');
+  const count = document.getElementById('exp-count');
+  if(!list) return;
+
+  // Totals by currency
+  const sums = {};
+  expenses.forEach(e=>{
+    if(!sums[e.currency]) sums[e.currency] = 0;
+    sums[e.currency] += parseFloat(e.amount) || 0;
+  });
+  const currs = Object.keys(sums);
+  if(!currs.length){
+    totals.innerHTML = `<div style="text-align:center;font-size:13px;opacity:0.85;padding:8px">עוד לא הוספת הוצאות</div>`;
+  } else {
+    totals.innerHTML = currs.map(c=>`
+      <div class="exp-sum-cell">
+        <div class="c">${CURRENCY_SYMBOLS[c]||c}</div>
+        <div class="v">${sums[c].toFixed(2)}</div>
+      </div>
+    `).join('');
+  }
+  count.textContent = expenses.length + ' רשומות';
+
+  if(!expenses.length){
+    list.innerHTML = `<div style="text-align:center;padding:30px;color:var(--g600);font-size:13px;background:#fff;border-radius:var(--r);border:1px dashed var(--g200)">
+      💡 לחץ "הוסף הוצאה" למעלה כדי להתחיל לעקוב
+    </div>`;
+    return;
+  }
+
+  // Sort newest first
+  const sorted = [...expenses].sort((a,b)=>(b.ts||'').localeCompare(a.ts||''));
+
+  list.innerHTML = sorted.map(e=>{
+    const cat = EXPENSE_CATEGORIES.find(c=>c.id===e.category) || {label:'📌 שונות'};
+    const symbol = CURRENCY_SYMBOLS[e.currency] || e.currency;
+    const date = e.ts ? new Date(e.ts).toLocaleDateString('he-IL',{day:'2-digit',month:'2-digit'}) : '';
+    const thumbContent = e.receipt
+      ? `<img src="${e.receipt}" alt="קבלה">`
+      : '🧾';
+    return `<div class="exp-card">
+      <div class="thumb" onclick="${e.receipt?`viewReceipt('${e.id}')`:`openExpenseEditor('${e.id}')`}">${thumbContent}</div>
+      <div class="info">
+        <div class="ttl">${escHtml(e.purpose||'(ללא תיאור)')}</div>
+        <div class="meta">
+          <span>${escHtml(cat.label)}</span>
+          <span>· ${escHtml(date)}</span>
+          ${e.receipt?`<span>· 📎 קבלה</span>`:''}
+        </div>
+      </div>
+      <div class="right">
+        <div class="amt">${symbol}${parseFloat(e.amount).toFixed(2)}</div>
+        <div class="acts">
+          <button onclick="openExpenseEditor('${e.id}')" title="ערוך">✏️</button>
+          <button onclick="deleteExpense('${e.id}')" title="מחק">🗑️</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openExpenseEditor(id){
+  let exp;
+  if(id){
+    exp = expenses.find(x=>x.id===id);
+  }
+  if(!exp){
+    exp = {
+      id: 'e' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+      purpose: '',
+      amount: '',
+      currency: 'EUR',
+      category: 'food',
+      receipt: null,
+      ts: new Date().toISOString()
+    };
+  }
+  currentExpenseEdit = exp;
+  currentExpenseCurrency = exp.currency || 'EUR';
+  currentExpenseCategory = exp.category || 'food';
+  currentExpenseReceipt = exp.receipt || null;
+
+  currentSheetType = 'expense';
+  document.getElementById('sheet-title').textContent = (id ? '✏️ ערוך' : '➕ הוסף') + ' הוצאה';
+
+  document.getElementById('sheet-body').innerHTML = `
+    <div class="field">
+      <label>מטרת ההוצאה</label>
+      <input type="text" id="exp-purpose" value="${escHtml(exp.purpose||'')}" placeholder="לדוגמה: ארוחת ערב, מונית מהשדה...">
+    </div>
+
+    <div class="field">
+      <label>קטגוריה</label>
+      <div class="cat-pick" id="exp-cat-pick">
+        ${EXPENSE_CATEGORIES.map(c=>`<button type="button" onclick="pickExpenseCategory('${c.id}')" data-cat="${c.id}">${escHtml(c.label)}</button>`).join('')}
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px">
+      <div class="field" style="flex:2">
+        <label>סכום</label>
+        <input type="number" id="exp-amount" value="${escHtml(String(exp.amount||''))}" placeholder="0.00" step="0.01" min="0" inputmode="decimal">
+      </div>
+      <div class="field" style="flex:1.5">
+        <label>מטבע</label>
+        <div class="curr-pick" id="exp-curr-pick" style="grid-template-columns:repeat(2,1fr)">
+          ${CURRENCIES.map(c=>`<button type="button" onclick="pickExpenseCurrency('${c}')" data-curr="${c}">${CURRENCY_SYMBOLS[c]} ${c}</button>`).join('')}
+        </div>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>תאריך</label>
+      <input type="date" id="exp-date" value="${exp.ts ? new Date(exp.ts).toISOString().slice(0,10) : new Date().toISOString().slice(0,10)}">
+    </div>
+
+    <div class="field">
+      <label>צילום קבלה</label>
+      <div class="photo-actions">
+        <button type="button" class="photo-btn camera" onclick="document.getElementById('exp-cam').click()">
+          <span class="ic">📷</span><span>צלם קבלה</span>
+        </button>
+        <button type="button" class="photo-btn gallery" onclick="document.getElementById('exp-gal').click()">
+          <span class="ic">🖼️</span><span>בחר מהגלריה</span>
+        </button>
+      </div>
+      <input type="file" id="exp-cam" accept="image/*" capture="environment" style="display:none">
+      <input type="file" id="exp-gal" accept="image/*" style="display:none">
+      <div id="exp-receipt-preview" class="receipt-preview"></div>
+    </div>
+  `;
+
+  document.getElementById('sheet-actions').style.display='flex';
+  document.getElementById('sheet-actions').innerHTML = `
+    <button class="btn btn-ghost" style="flex:1" onclick="closeSheet()">ביטול</button>
+    <button class="btn btn-primary" style="flex:2" onclick="saveExpense()">💾 שמור</button>
+  `;
+
+  // Wire up file inputs
+  document.getElementById('exp-cam').addEventListener('change', handleReceiptUpload);
+  document.getElementById('exp-gal').addEventListener('change', handleReceiptUpload);
+
+  // Mark currently selected currency/category
+  setTimeout(()=>{
+    pickExpenseCurrency(currentExpenseCurrency);
+    pickExpenseCategory(currentExpenseCategory);
+    if(currentExpenseReceipt) showReceiptPreview(currentExpenseReceipt);
+  }, 0);
+
+  openSheet();
+}
+
+function pickExpenseCurrency(c){
+  currentExpenseCurrency = c;
+  document.querySelectorAll('#exp-curr-pick button').forEach(b=>{
+    b.classList.toggle('on', b.dataset.curr === c);
+  });
+}
+
+function pickExpenseCategory(c){
+  currentExpenseCategory = c;
+  document.querySelectorAll('#exp-cat-pick button').forEach(b=>{
+    b.classList.toggle('on', b.dataset.cat === c);
+  });
+}
+
+async function handleReceiptUpload(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  try{
+    const compressed = await compressImage(file, 1400, 0.8);
+    currentExpenseReceipt = compressed.data;
+    showReceiptPreview(compressed.data);
+  }catch(err){
+    toast('❌ שגיאה בטעינת תמונה','err');
+  }
+  e.target.value = '';
+}
+
+function showReceiptPreview(dataUrl){
+  const box = document.getElementById('exp-receipt-preview');
+  if(!box) return;
+  box.classList.add('on');
+  box.innerHTML = `<img src="${dataUrl}" alt="קבלה"><button class="rm" onclick="removeReceipt()" type="button">✕</button>`;
+}
+
+function removeReceipt(){
+  currentExpenseReceipt = null;
+  const box = document.getElementById('exp-receipt-preview');
+  if(box){ box.classList.remove('on'); box.innerHTML = ''; }
+}
+
+function saveExpense(){
+  const purpose = document.getElementById('exp-purpose').value.trim();
+  const amount = parseFloat(document.getElementById('exp-amount').value);
+  const date = document.getElementById('exp-date').value;
+  if(!purpose){ toast('✋ הזן מטרה להוצאה','err'); return; }
+  if(isNaN(amount) || amount <= 0){ toast('✋ הזן סכום תקין','err'); return; }
+
+  const exp = currentExpenseEdit;
+  exp.purpose = purpose;
+  exp.amount = amount;
+  exp.currency = currentExpenseCurrency;
+  exp.category = currentExpenseCategory;
+  exp.receipt = currentExpenseReceipt;
+  exp.ts = date ? new Date(date + 'T12:00:00').toISOString() : new Date().toISOString();
+
+  // Add to list if new
+  if(!expenses.find(x=>x.id===exp.id)){
+    expenses.push(exp);
+  }
+
+  lsSet('berlin_expenses', expenses);
+  closeSheet();
+  renderExpenses();
+  toast('✅ ההוצאה נשמרה');
+}
+
+function deleteExpense(id){
+  if(!confirm('למחוק את ההוצאה?')) return;
+  expenses = expenses.filter(e=>e.id!==id);
+  lsSet('berlin_expenses', expenses);
+  renderExpenses();
+  toast('🗑️ נמחק');
+}
+
+function viewReceipt(id){
+  const exp = expenses.find(x=>x.id===id);
+  if(!exp || !exp.receipt) return;
+  currentSheetType='receipt';
+  document.getElementById('sheet-title').textContent='🧾 ' + (exp.purpose || 'קבלה');
+  document.getElementById('sheet-body').innerHTML = `
+    <img src="${exp.receipt}" alt="קבלה" style="width:100%;border-radius:8px;display:block">
+    <div style="margin-top:12px;background:var(--g50);padding:12px;border-radius:8px;font-size:13px;line-height:1.6">
+      <div><strong>סכום:</strong> ${CURRENCY_SYMBOLS[exp.currency]||exp.currency} ${parseFloat(exp.amount).toFixed(2)}</div>
+      <div><strong>תאריך:</strong> ${new Date(exp.ts).toLocaleDateString('he-IL')}</div>
+    </div>
+    <button class="btn btn-primary btn-full" style="margin-top:12px" onclick="downloadReceipt('${exp.id}')">⬇️ הורד תמונה</button>
+    <button class="btn btn-ghost btn-full" style="margin-top:6px" onclick="openExpenseEditor('${exp.id}')">✏️ ערוך פרטים</button>
+  `;
+  document.getElementById('sheet-actions').style.display='none';
+  openSheet();
+}
+
+function downloadReceipt(id){
+  const exp = expenses.find(x=>x.id===id);
+  if(!exp || !exp.receipt) return;
+  const a = document.createElement('a');
+  a.href = exp.receipt;
+  a.download = 'receipt_' + (exp.purpose||'').replace(/[^a-zא-ת0-9]/gi,'_').slice(0,30) + '.jpg';
+  a.click();
+}
+
+function exportExpenses(){
+  if(!expenses.length){ toast('אין הוצאות לייצוא','err'); return; }
+  const rows = [['תאריך','מטרה','קטגוריה','סכום','מטבע','קבלה']];
+  expenses.forEach(e=>{
+    const cat = EXPENSE_CATEGORIES.find(c=>c.id===e.category);
+    rows.push([
+      new Date(e.ts).toLocaleDateString('he-IL'),
+      e.purpose,
+      cat ? cat.label.replace(/^\W+\s/,'') : 'שונות',
+      e.amount,
+      e.currency,
+      e.receipt ? 'יש' : 'אין'
+    ]);
+  });
+  const csv = '\ufeff' + rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'expenses_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
+  toast('✅ הקובץ הורד');
+}
+
+function printExpenses(){
+  if(!expenses.length){ toast('אין הוצאות להדפסה','err'); return; }
+  const sums = {};
+  expenses.forEach(e=>{
+    if(!sums[e.currency]) sums[e.currency] = 0;
+    sums[e.currency] += parseFloat(e.amount) || 0;
+  });
+  const sorted = [...expenses].sort((a,b)=>(a.ts||'').localeCompare(b.ts||''));
+  const name = lsGet('sos_name','') || 'משתתף משלחת';
+  const today = new Date().toLocaleDateString('he-IL');
+
+  let html = `<div style="font-family:'Heebo',sans-serif;direction:rtl;padding:20px;max-width:800px;margin:0 auto;color:#1a1a1a">
+    <div style="text-align:center;border-bottom:2px solid #b07800;padding-bottom:14px;margin-bottom:18px">
+      <div style="font-size:32px">🇩🇪✈️</div>
+      <h1 style="font-size:22px;margin:8px 0;color:#0c447c">דו"ח הוצאות — משלחת ברלין 2026</h1>
+      <div style="font-size:13px;color:#666">${escHtml(name)} · ${escHtml(today)}</div>
+    </div>
+
+    <div style="background:#fff8e1;border:1px solid #b07800;border-radius:10px;padding:14px;margin-bottom:18px">
+      <h3 style="color:#b07800;margin-bottom:8px;font-size:15px">סך הכל לפי מטבע</h3>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        ${Object.keys(sums).map(c=>`<div><strong style="font-size:18px">${CURRENCY_SYMBOLS[c]||c} ${sums[c].toFixed(2)}</strong></div>`).join('')}
+      </div>
+      <div style="font-size:11px;color:#666;margin-top:6px">${expenses.length} רשומות סה"כ</div>
+    </div>
+
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead>
+        <tr style="background:#f7f7f7">
+          <th style="text-align:right;padding:8px;border-bottom:2px solid #ddd">תאריך</th>
+          <th style="text-align:right;padding:8px;border-bottom:2px solid #ddd">מטרה</th>
+          <th style="text-align:right;padding:8px;border-bottom:2px solid #ddd">קטגוריה</th>
+          <th style="text-align:left;padding:8px;border-bottom:2px solid #ddd">סכום</th>
+          <th style="text-align:center;padding:8px;border-bottom:2px solid #ddd">קבלה</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${sorted.map(e=>{
+          const cat = EXPENSE_CATEGORIES.find(c=>c.id===e.category) || {label:'שונות'};
+          return `<tr>
+            <td style="padding:8px;border-bottom:1px solid #eee">${new Date(e.ts).toLocaleDateString('he-IL')}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">${escHtml(e.purpose)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;font-size:11px;color:#666">${escHtml(cat.label)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;text-align:left;font-weight:700">${CURRENCY_SYMBOLS[e.currency]||e.currency}${parseFloat(e.amount).toFixed(2)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;text-align:center">${e.receipt?'✓':'—'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+
+    ${sorted.filter(e=>e.receipt).length ? `
+      <h2 style="margin-top:30px;color:#0c447c;font-size:18px;page-break-before:always">קבלות</h2>
+      ${sorted.filter(e=>e.receipt).map(e=>`
+        <div style="margin-bottom:24px;page-break-inside:avoid">
+          <div style="background:#f7f7f7;padding:8px 12px;border-radius:6px;margin-bottom:8px;font-size:13px">
+            <strong>${escHtml(e.purpose)}</strong> · ${new Date(e.ts).toLocaleDateString('he-IL')} · ${CURRENCY_SYMBOLS[e.currency]||e.currency}${parseFloat(e.amount).toFixed(2)}
+          </div>
+          <img src="${e.receipt}" style="max-width:100%;max-height:500px;border:1px solid #ddd;border-radius:6px">
+        </div>
+      `).join('')}
+    ` : ''}
+  </div>`;
+
+  const printDiv = document.getElementById('exp-print');
+  printDiv.innerHTML = html;
+  printDiv.style.display = 'block';
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+  setTimeout(()=>{
+    window.print();
+    setTimeout(()=>{
+      printDiv.style.display = 'none';
+      document.getElementById('page-expenses').classList.add('on');
+    }, 500);
+  }, 200);
+}
 
 // ==================== USER TRACKING (Analytics) ====================
 // Generate or get the unique user ID for this browser
@@ -1173,6 +1625,7 @@ function goPage(p){
   if(p==='home') renderHome();
   if(p==='schedule') renderSchedule();
   if(p==='reflect'){ renderRefDays(); renderReflections(); }
+  if(p==='expenses') renderExpenses();
   if(p==='admin'){ if(isAdminLogged()) showAdminPanel(); else showAdminLogin(); }
 }
 
@@ -2683,12 +3136,14 @@ function waitForFirebase(timeoutMs=5000){
 
 async function init(){
   loadLocal();
+  loadExpenses();
   // If running as offline copy, skip cloud loading
   if(isOfflineCopy){
     renderSchedule();
     renderHome();
     renderRefDays();
     renderReflections();
+    renderExpenses();
     updateSyncPill(false);
     startLocation();
     loadWeather();
@@ -2703,6 +3158,7 @@ async function init(){
   renderHome();
   renderRefDays();
   renderReflections();
+  renderExpenses();
   // Show weather and location right away
   loadWeather();
   startLocation();
