@@ -1,13 +1,299 @@
 <!DOCTYPE html>
-<html lang="he" dir="rtl">
-<head>
+<html lang="he" dir="rtl"><head>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+      (function() {
+        const originalConsole = window.console;
+        window.console = {
+          log: (...args) => {
+            originalConsole.log(...args);
+            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
+          },
+          error: (...args) => {
+            originalConsole.error(...args);
+            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
+          },
+          warn: (...args) => {
+            originalConsole.warn(...args);
+            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
+          }
+        };
+
+        let requestId = 0;
+        let callbacksMap = new Map();
+        let streamControllers = new Map();
+        
+        window.claude = {
+          complete: (prompt) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
+            });
+          }
+        };
+
+        window.storage = {
+          get: (key, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageGet', id, key, shared }, '*');
+            });
+          },
+          set: (key, value, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageSet', id, key, value, shared }, '*');
+            });
+          },
+          delete: (key, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageDelete', id, key, shared }, '*');
+            });
+          },
+          list: (prefix, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageList', id, prefix, shared }, '*');
+            });
+          }
+        };
+
+        let pendingBlobs = new Map();
+        URL.createObjectURL = (blob) => {
+          // Store the blob and create an ID and URL for it
+          const blobId = `blob-${Date.now()}-${Math.random()}`;
+          pendingBlobs.set(blobId, blob);
+          return `blob-request://${blobId}`;
+        };
+
+        URL.revokeObjectURL = (url) => {
+          // Remove the blob from our store
+          const blobId = url.replace("blob-request://", "");
+          pendingBlobs.delete(blobId);
+        };
+
+        const getBlobFromURL = (url) => {
+          const blobId = url.replace("blob-request://", "");
+          return pendingBlobs.get(blobId);
+        };
+
+        // Override global fetch with streaming support
+        window.fetch = (url, init = {}) => {
+          return new Promise((resolve, reject) => {
+            const id = requestId++;
+            const channelId = `fetch-${id}-${Date.now()}`;
+            
+            callbacksMap.set(id, { 
+              resolve: (response) => {
+                // Create a ReadableStream for the response body
+                const stream = new ReadableStream({
+                  start(controller) {
+                    streamControllers.set(channelId, controller);
+                  },
+                  cancel() {
+                    streamControllers.delete(channelId);
+                  }
+                });
+                
+                // Create and return the Response with the stream
+                resolve(new Response(stream, {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers
+                }));
+              },
+              reject,
+              channelId
+            });
+            
+            window.parent.postMessage({
+              type: 'proxyFetch',
+              id,
+              url,
+              init,
+              channelId
+            }, '*');
+          });
+        };
+
+        window.addEventListener('message', async (event) => {
+          if (event.data.type === 'takeScreenshot') {
+            const rootElement = document.getElementById('artifacts-component-root-html');
+            if (!rootElement) {
+              window.parent.postMessage({
+                type: 'screenshotError',
+                error: new Error('Root element not found'),
+              }, '*');
+            }
+            const screenshot = await htmlToImage.toPng(rootElement, {
+              imagePlaceholder:
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
+            });
+            window.parent.postMessage({
+              type: 'screenshotData',
+              data: screenshot,
+            }, '*');
+          } else if (event.data.type === 'claudeComplete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.completion);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'proxyFetchResponse') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+              callbacksMap.delete(event.data.id);
+            } else {
+              // Initial response with headers, status, etc.
+              callback.resolve({
+                status: event.data.status,
+                statusText: event.data.statusText,
+                headers: event.data.headers
+              });
+              // Don't delete the callback yet if streaming
+              if (!event.data.body) {
+                callbacksMap.delete(event.data.id);
+              }
+            }
+          } else if (event.data.type === 'proxyFetchStream') {
+            // Handle streaming data chunks
+            const controller = streamControllers.get(event.data.channelId);
+            if (controller) {
+              if (event.data.error) {
+                controller.error(new Error(event.data.error));
+                streamControllers.delete(event.data.channelId);
+              } else if (event.data.done) {
+                controller.close();
+                streamControllers.delete(event.data.channelId);
+                // Clean up the callback
+                const callback = Array.from(callbacksMap.entries()).find(
+                  ([_, value]) => value.channelId === event.data.channelId
+                );
+                if (callback) {
+                  callbacksMap.delete(callback[0]);
+                }
+              } else if (event.data.chunk) {
+                controller.enqueue(new Uint8Array(event.data.chunk));
+              }
+            }
+          } else if (event.data.type === 'storageGet') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageSet') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageDelete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageList') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          }
+        });
+
+        window.addEventListener('click', (event) => {
+          const isEl = event.target instanceof HTMLElement;
+          if (!isEl) return;
+    
+          // find ancestor links
+          const linkEl = event.target.closest("a");
+          if (!linkEl || !linkEl.href) return;
+    
+          event.preventDefault();
+          event.stopImmediatePropagation();
+    
+          if (linkEl.href.startsWith("blob-request:")) {
+            const blob = getBlobFromURL(linkEl.href);
+            if (!blob) return;
+            void blob.arrayBuffer().then((data) => {
+              window.parent.postMessage({
+                type: "downloadFile",
+                filename: linkEl.download,
+                data,
+                mimeType: blob.type || "application/octet-stream",
+              });
+            });
+          } else if (linkEl.href.startsWith("data:")) {
+            const [header, base64Data] = linkEl.href.split(",");
+            const mimeMatch = header.match(/data:([^;]+)/);
+            const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+            const binaryString = atob(base64Data);
+            const data = Uint8Array.from(binaryString, (c) =>
+              c.charCodeAt(0),
+            ).buffer;
+            window.parent.postMessage({
+              type: "downloadFile",
+              filename: linkEl.download,
+              data,
+              mimeType,
+            });
+          } else {
+            let linkUrl;
+            try {
+              linkUrl = new URL(linkEl.href);
+            } catch (error) {
+              return;
+            }
+    
+            if (linkUrl.hostname === window.location.hostname) return;
+      
+            window.parent.postMessage({
+              type: 'openExternal',
+              href: linkEl.href,
+            }, '*');
+          }
+      });
+
+        const originalOpen = window.open;
+        window.open = function (url) {
+          window.parent.postMessage({
+            type: "openExternal",
+            href: url,
+          }, "*");
+        };
+
+        window.addEventListener('error', (event) => {
+          window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*');
+        });
+      })();
+    </script>
+  
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="theme-color" content="#1a5fa5">
 <title>משלחת ברלין 2026</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&amp;display=swap" rel="stylesheet">
 <!-- Firebase (Realtime Database) -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
@@ -63,6 +349,22 @@ a{color:var(--blue);text-decoration:none}
 input,textarea,select{font-family:inherit;font-size:16px;width:100%;padding:10px 12px;border:1px solid var(--g200);border-radius:var(--rs);background:#fff;color:var(--g900);outline:none}
 input:focus,textarea:focus,select:focus{border-color:var(--blue)}
 textarea{resize:vertical;min-height:80px}
+
+/* REGISTRATION OVERLAY */
+.reg-overlay{position:fixed;inset:0;background:linear-gradient(180deg,#f4f7fb 0%,#e8eef5 100%);z-index:1000;overflow-y:auto;display:none}
+.reg-overlay.on{display:block}
+.reg-container{max-width:480px;margin:0 auto;padding:20px 16px 40px}
+.reg-hero{text-align:center;padding:24px 16px 18px;color:var(--g900)}
+.reg-logo{width:120px;height:120px;object-fit:contain;background:#fff;border-radius:50%;padding:8px;box-shadow:0 6px 20px rgba(26,95,165,0.15);margin-bottom:14px;border:3px solid var(--blue-l)}
+.reg-eyebrow{font-size:12px;font-weight:600;color:var(--blue);letter-spacing:1px;margin-bottom:4px}
+.reg-title{font-size:26px;font-weight:800;color:var(--blue-d);line-height:1.1;margin-bottom:6px}
+.reg-flags{font-size:22px;letter-spacing:6px;margin:6px 0}
+.reg-dates{font-size:13px;color:var(--g600)}
+.reg-card{background:#fff;border-radius:16px;padding:20px;box-shadow:0 4px 20px rgba(0,0,0,0.06);border:1px solid var(--g100)}
+.reg-card .field{margin-bottom:12px}
+.reg-card .field label{display:block;font-size:12px;color:var(--g700);font-weight:600;margin-bottom:5px}
+.reg-card .field input{width:100%;padding:11px 12px;border:1.5px solid var(--g200);border-radius:10px;font-size:15px;font-family:inherit;background:#fff}
+.reg-card .field input:focus{outline:none;border-color:var(--blue);background:#fafcff}
 
 /* HEADER */
 .hdr{position:sticky;top:0;z-index:50;background:var(--blue);color:#fff;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
@@ -245,6 +547,22 @@ textarea{resize:vertical;min-height:80px}
 .settings-card h3{font-size:14px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:6px}
 .settings-card label{display:block;font-size:12px;font-weight:600;color:var(--g600);margin:8px 0 4px 0}
 
+/* REGISTRATIONS LIST */
+.reg-row{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:12px;margin-bottom:8px;box-shadow:var(--shadow)}
+.reg-row-h{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.reg-avatar{width:38px;height:38px;border-radius:50%;background:var(--blue-l);color:var(--blue);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;flex-shrink:0}
+.reg-info{flex:1;min-width:0}
+.reg-info .reg-nm{font-weight:700;font-size:15px;color:var(--g900);line-height:1.2}
+.reg-info .reg-sub{font-size:11px;color:var(--g600);margin-top:2px}
+.reg-acts{display:flex;gap:5px;flex-shrink:0}
+.reg-acts .reg-act{width:34px;height:34px;border-radius:8px;background:var(--g50);display:flex;align-items:center;justify-content:center;font-size:14px;text-decoration:none;border:1px solid var(--g100)}
+.reg-acts .reg-act.danger{background:var(--red-l)}
+.reg-details{font-size:12px;color:var(--g700);line-height:1.7;border-top:1px solid var(--g100);padding-top:8px}
+.reg-details a{color:var(--blue);text-decoration:none;font-weight:600}
+.reg-details .reg-lbl{display:inline-block;min-width:100px;color:var(--g500);font-size:11px;font-weight:500}
+.reg-details .reg-emer{background:var(--red-l);color:var(--red);padding:6px 8px;border-radius:6px;margin-top:5px}
+.reg-details .reg-emer .reg-lbl{color:var(--red);font-weight:700}
+
 /* EXPENSES */
 .exp-summary{background:linear-gradient(135deg,var(--amber) 0%,#8a5a00 100%);color:#fff;border-radius:var(--r);padding:16px;margin-bottom:14px;box-shadow:var(--shadow)}
 .exp-sum-h{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
@@ -302,6 +620,20 @@ textarea{resize:vertical;min-height:80px}
 .user-row .badge.ok{background:var(--green-l);color:var(--green)}
 .user-row .badge.miss{background:var(--g100);color:var(--g600)}
 .user-row .time{font-size:10px;color:var(--g600);flex-shrink:0;text-align:left}
+
+.reg-row{background:#fff;border:1px solid var(--g100);border-radius:var(--r);padding:14px;margin-bottom:8px;box-shadow:var(--shadow)}
+.reg-row .top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;gap:8px}
+.reg-row .nm{font-weight:700;font-size:15px;color:var(--g900);line-height:1.2}
+.reg-row .ts{font-size:11px;color:var(--g600);white-space:nowrap;flex-shrink:0}
+.reg-row .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--g700);margin-bottom:8px}
+.reg-row .cell{background:var(--g50);padding:8px 10px;border-radius:6px}
+.reg-row .lb{color:var(--g600);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.3px;margin-bottom:2px}
+.reg-row .vl{font-weight:600;color:var(--g900);font-size:13px;word-break:break-word}
+.reg-row .vl a{color:var(--blue);text-decoration:none}
+.reg-row .acts{display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--g100)}
+.reg-row .acts a{flex:1;padding:8px;border-radius:6px;font-size:11px;font-weight:600;text-align:center;text-decoration:none;background:var(--g50);color:var(--g700);border:1px solid var(--g200)}
+.reg-row .acts a.wa{background:var(--green-l);color:var(--green);border-color:var(--green)}
+.reg-row .acts a.tel{background:var(--blue-l);color:var(--blue);border-color:var(--blue)}
 
 .admin-login{max-width:360px;margin:40px auto;background:#fff;border-radius:var(--r);padding:24px;box-shadow:var(--shadow);text-align:center;border:1px solid var(--g100)}
 .admin-login .ic{font-size:42px;margin-bottom:10px}
@@ -421,7 +753,96 @@ textarea{resize:vertical;min-height:80px}
 }
 </style>
 </head>
-<body>
+<body id="artifacts-component-root-html" style="overflow: hidden;">
+
+<!-- REGISTRATION OVERLAY (full screen) -->
+<div id="reg-overlay" class="reg-overlay">
+  <div class="reg-container">
+    <div id="reg-form-view">
+      <div class="reg-hero">
+        <img src="logo.png" alt="לוגו" class="reg-logo" onerror="this.style.display='none'" style="display: none;">
+        <div class="reg-eyebrow">משלחת מב"ל רגבים</div>
+        <div class="reg-title">ברלין 2026</div>
+        <div class="reg-flags">🇮🇱 🇩🇪</div>
+        <div class="reg-dates">26–30 באפריל 2026</div>
+      </div>
+
+      <div class="reg-card">
+        <h2 style="font-size:18px;margin-bottom:6px;color:var(--g900)">📋 רישום למשלחת</h2>
+        <div style="font-size:13px;color:var(--g600);line-height:1.5;margin-bottom:16px">
+          ברוכים הבאים! אנא מלא את הפרטים הבאים. כל השדות חובה.
+        </div>
+
+        <div class="field">
+          <label>שם מלא <span style="color:var(--red)">*</span></label>
+          <input type="text" id="reg-name" placeholder="שם פרטי ושם משפחה" autocomplete="name">
+        </div>
+
+        <div class="field">
+          <label>טלפון אישי <span style="color:var(--red)">*</span></label>
+          <input type="tel" id="reg-phone" placeholder="050-1234567" autocomplete="tel" inputmode="tel">
+        </div>
+
+        <div class="field">
+          <label>שם איש קשר בארץ <span style="color:var(--red)">*</span></label>
+          <input type="text" id="reg-emer-name" placeholder="לדוגמה: בת זוג, אמא, אח" autocomplete="off">
+        </div>
+
+        <div class="field">
+          <label>טלפון איש קשר <span style="color:var(--red)">*</span></label>
+          <input type="tel" id="reg-emer-phone" placeholder="050-1234567" autocomplete="off" inputmode="tel">
+        </div>
+
+        <div class="field">
+          <label>תאריך חזרה לישראל <span style="color:var(--red)">*</span></label>
+          <input type="date" id="reg-return" min="2026-04-26" max="2026-06-30">
+          <div style="font-size:11px;color:var(--g600);margin-top:4px">המשלחת חוזרת ב-30/4. יש לציין תאריך מאוחר יותר אם נשארים בחו"ל.</div>
+        </div>
+
+        <div id="reg-error" style="background:var(--red-l);color:var(--red);padding:10px;border-radius:8px;font-size:13px;margin-bottom:10px;display:none"></div>
+
+        <button class="btn btn-primary btn-full" style="padding:14px;font-size:15px" onclick="submitRegistration()">
+          ✅ סיים הרשמה
+        </button>
+
+        <div style="font-size:11px;color:var(--g600);text-align:center;margin-top:14px;line-height:1.5">
+          🔒 הפרטים נשמרים בצורה מאובטחת בענן ומשמשים את צוות הניהול בלבד למקרי חירום.
+        </div>
+      </div>
+    </div>
+
+    <div id="reg-success-view" style="display:none">
+      <div class="reg-hero">
+        <div style="font-size:80px;margin-bottom:12px">✅</div>
+        <div class="reg-title">ההרשמה הושלמה!</div>
+        <div class="reg-dates">תודה <span id="reg-success-name">משתתף</span></div>
+      </div>
+
+      <div class="reg-card" style="text-align:center">
+        <h2 style="color:var(--green);margin-bottom:10px">🎉 ברוך הבא למשלחת</h2>
+        <div style="font-size:14px;color:var(--g700);line-height:1.6;margin-bottom:20px">
+          הפרטים שלך נקלטו בהצלחה במערכת.<br>
+          לפני סגירת המסך, הצטרף לקבוצת WhatsApp של המשלחת:
+        </div>
+
+        <a href="https://chat.whatsapp.com/DSzH7SzOHnvBXHwbGx31SI" target="_blank" rel="noopener" class="btn btn-success btn-full" style="padding:16px;font-size:15px;text-decoration:none;margin-bottom:12px">
+          💬 הצטרף לקבוצת WhatsApp
+        </a>
+
+        <div style="background:var(--blue-l);border-radius:8px;padding:12px;margin-top:16px;font-size:12px;color:var(--blue-d);line-height:1.5;text-align:right">
+          <strong>📱 מה הלאה?</strong><br>
+          1. הצטרף לקבוצה (לחץ על הכפתור למעלה)<br>
+          2. שמור את האפליקציה במכשיר שלך<br>
+          3. כל עדכון יישלח אליך דרך הקבוצה
+        </div>
+
+        <button class="btn btn-ghost btn-full" style="margin-top:14px" onclick="enterApp()">
+          🚀 כניסה לאפליקציה
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- HEADER -->
 <header class="hdr">
@@ -434,7 +855,7 @@ textarea{resize:vertical;min-height:80px}
   </div>
   <div class="hdr-actions">
     <button class="hdr-btn" onclick="openShareSheet()" title="שיתוף">
-      <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/></svg>
+      <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"></path></svg>
     </button>
     <button class="hdr-btn sos-hdr" onclick="goPage('sos')">SOS</button>
   </div>
@@ -444,7 +865,7 @@ textarea{resize:vertical;min-height:80px}
 <section id="page-home" class="page on">
   <div class="hero">
     <div class="hero-bg"></div>
-    <img src="logo.png" alt="לוגו משלחת" class="hero-logo" onerror="this.style.display='none'">
+    <img src="logo.png" alt="לוגו משלחת" class="hero-logo" onerror="this.style.display='none'" style="display: none;">
     <div class="hero-content">
       <div class="hero-eyebrow">משלחת מב"ל רגבים</div>
       <div class="hero-title">ברלין 2026</div>
@@ -634,7 +1055,7 @@ textarea{resize:vertical;min-height:80px}
         </button>
       </div>
       <input type="file" id="ref-camera" accept="image/*" capture="environment" style="display:none">
-      <input type="file" id="ref-imgs" accept="image/*" multiple style="display:none">
+      <input type="file" id="ref-imgs" accept="image/*" multiple="" style="display:none">
       <div id="ref-img-preview" class="img-grid"></div>
     </div>
     <button class="btn btn-primary btn-full" onclick="saveReflection()">💾 שמור רפלקציה</button>
@@ -706,14 +1127,22 @@ textarea{resize:vertical;min-height:80px}
 
   <a id="sos-wa-btn" href="#" class="btn btn-success btn-full" style="margin-bottom:14px;padding:14px;font-size:15px;text-decoration:none" onclick="prepareSOSWhatsApp(event)">💬 שלח הודעת חירום ב-WhatsApp</a>
 
+  <div style="background:var(--blue-l);border:1px solid var(--blue);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:var(--blue-d);line-height:1.5">
+    <strong>💡 איך זה עובד:</strong><br>
+    אם הוגדרה קבוצת WhatsApp — ההודעה תועתק אוטומטית והקבוצה תיפתח (הדבק ושלח).<br>
+    אם לא — ההודעה תישלח ישירות לאיש הקשר שהגדרת.
+  </div>
+
   <div class="settings-card">
     <h3>⚙️ הגדרות SOS</h3>
     <label>השם שלי (יופיע בהודעה)</label>
     <input type="text" id="sos-name" placeholder="שם מלא">
-    <label>מספר WhatsApp לשליחה (עם קידומת, ללא +)</label>
-    <input type="tel" id="sos-num" placeholder="972501234567">
-    <label>קישור לקבוצת WhatsApp (אופציונלי)</label>
+    <label>קישור לקבוצת WhatsApp (מומלץ — שליחה לקבוצה)</label>
     <input type="url" id="sos-grp" placeholder="https://chat.whatsapp.com/...">
+    <label style="font-size:11px;color:var(--g600);font-weight:500;margin-top:-4px">📌 אם הקבוצה הוגדרה — ההודעה תישלח אליה כברירת מחדל</label>
+    <label style="margin-top:10px">מספר WhatsApp אישי (גיבוי)</label>
+    <input type="tel" id="sos-num" placeholder="972501234567">
+    <label style="font-size:11px;color:var(--g600);font-weight:500;margin-top:-4px">📌 משמש כשאין קבוצה. עם קידומת, ללא +</label>
     <button class="btn btn-primary btn-full" style="margin-top:10px" onclick="saveSOSSettings()">💾 שמור הגדרות</button>
   </div>
 </section>
@@ -737,6 +1166,7 @@ textarea{resize:vertical;min-height:80px}
     <div class="adm-tabs">
       <button class="adm-tab on" data-adm="schedule" onclick="switchAdm('schedule')">📅 לו"ז</button>
       <button class="adm-tab" data-adm="msgs" onclick="switchAdm('msgs')">📢 הודעות</button>
+      <button class="adm-tab" data-adm="regs" onclick="switchAdm('regs')">👥 רישום</button>
       <button class="adm-tab" data-adm="analytics" onclick="switchAdm('analytics')">📊 נתונים</button>
       <button class="adm-tab" data-adm="settings" onclick="switchAdm('settings')">⚙️ הגדרות</button>
     </div>
@@ -764,6 +1194,36 @@ textarea{resize:vertical;min-height:80px}
       </div>
       <h2 class="section-title">📜 היסטוריית הודעות</h2>
       <div id="msg-history"></div>
+    </div>
+
+    <div id="adm-regs" class="adm-panel">
+      <div style="background:linear-gradient(135deg,var(--blue) 0%,var(--blue-d) 100%);color:#fff;border-radius:var(--r);padding:14px 16px;margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div>
+            <div style="font-size:13px;opacity:0.9">משתתפים רשומים</div>
+            <div style="font-size:32px;font-weight:800;line-height:1" id="reg-stat-count">—</div>
+          </div>
+          <div style="font-size:42px;opacity:0.5">👥</div>
+        </div>
+
+        <button class="btn" style="background:rgba(255,255,255,0.2);color:#fff;width:100%;padding:10px;font-size:13px;backdrop-filter:blur(4px)" onclick="copyRegistrationLink()">
+          🔗 העתק קישור הרשמה לחברי המשלחת
+        </button>
+      </div>
+
+      <div style="display:flex;gap:6px;margin-bottom:12px">
+        <button class="btn btn-ghost" style="flex:1;padding:10px;font-size:13px" onclick="refreshRegistrations()">🔄 רענן</button>
+        <button class="btn btn-ghost" style="flex:1;padding:10px;font-size:13px" onclick="exportRegistrations()">📊 ייצא CSV</button>
+        <button class="btn btn-ghost" style="flex:1;padding:10px;font-size:13px" onclick="printRegistrations()">🖨️ הדפס</button>
+      </div>
+
+      <div id="reg-list"></div>
+
+      <div style="background:var(--amber-l);border:1px solid var(--amber);border-radius:8px;padding:10px 12px;margin-top:14px;font-size:12px;color:#7a5600;line-height:1.5">
+        <strong>💡 איך זה עובד:</strong><br>
+        העתק את הקישור ושלח לחברי המשלחת. הם יראו טופס הרשמה ייעודי. הפרטים יישמרו אוטומטית בענן וייראו כאן.<br>
+        <strong>מבנה הקישור:</strong> <code style="background:#fff;padding:1px 5px;border-radius:3px;font-size:10px">?register</code>
+      </div>
     </div>
 
     <div id="adm-analytics" class="adm-panel">
@@ -834,10 +1294,52 @@ textarea{resize:vertical;min-height:80px}
 <div id="sheet" class="sheet">
   <div class="sheet-handle"></div>
   <div class="sheet-header">
-    <h3 id="sheet-title">—</h3>
+    <h3 id="sheet-title">שיתוף וייצוא</h3>
     <button onclick="closeSheet()" style="font-size:20px;color:var(--g600);padding:4px 8px">✕</button>
   </div>
-  <div class="sheet-body" id="sheet-body"></div>
+  <div class="sheet-body" id="sheet-body">
+    
+    <div style="background:var(--amber-l);border:1px solid var(--amber);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.5;color:#7a5600">
+      <strong>⚠️ הקישור של האפליקציה הזו אישי</strong> — לשיתוף עם חברי המשלחת, השתמש ב<strong>"הורד את האפליקציה (HTML)"</strong> למטה ושלח את הקובץ.
+    </div>
+    <p style="color:var(--g600);font-size:13px;margin-bottom:14px">שתף עם חברי המשלחת או ייצא את התוכן לשימוש אישי.</p>
+
+    <div style="font-size:12px;font-weight:700;color:var(--g600);margin:8px 0 8px 2px">📤 שיתוף הקישור (אישי)</div>
+    <div class="share-opt wa" onclick="shareVia('whatsapp')">
+      <span class="ic">💬</span><div>WhatsApp</div>
+    </div>
+    <div class="share-opt tg" onclick="shareVia('native')">
+      <span class="ic">📲</span><div>שתף...</div>
+    </div>
+    <div class="share-opt mail" onclick="shareVia('email')">
+      <span class="ic">📧</span><div>אימייל</div>
+    </div>
+    <div class="share-opt copy" onclick="shareVia('copy')">
+      <span class="ic">📋</span><div>העתק קישור</div>
+    </div>
+
+    <div style="font-size:12px;font-weight:700;color:var(--g600);margin:18px 0 8px 2px">💾 ייצוא תוכן (מומלץ לשיתוף)</div>
+    <div class="share-opt" onclick="exportStandaloneHTML()" style="border:2px solid var(--blue);background:var(--blue-l)">
+      <span class="ic" style="background:var(--blue-l);color:var(--blue)">🌐</span>
+      <div><div>הורד את האפליקציה (HTML)</div><div style="font-size:12px;color:var(--g600);font-weight:400">קובץ שעובד במצב אופליין — שלח אותו כקובץ מצורף</div></div>
+    </div>
+    <div class="share-opt" onclick="exportScheduleText()">
+      <span class="ic" style="background:var(--amber-l);color:var(--amber)">📄</span>
+      <div><div>הורד לו"ז כטקסט</div><div style="font-size:12px;color:var(--g600);font-weight:400">.txt — לשיתוף ב-WhatsApp או אימייל</div></div>
+    </div>
+    <div class="share-opt" onclick="shareScheduleWhatsApp()">
+      <span class="ic" style="background:#25d36620;color:#25d366">📅</span>
+      <div><div>שלח לו"ז ב-WhatsApp</div><div style="font-size:12px;color:var(--g600);font-weight:400">גרסה קצרה מעוצבת</div></div>
+    </div>
+    <div class="share-opt" onclick="printSchedule()">
+      <span class="ic" style="background:var(--g100);color:var(--g900)">🖨️</span>
+      <div><div>הדפס / שמור PDF</div><div style="font-size:12px;color:var(--g600);font-weight:400">לו"ז מלא להדפסה</div></div>
+    </div>
+    <div class="share-opt" onclick="exportBackup();closeSheet();">
+      <span class="ic" style="background:var(--purple-l);color:var(--purple)">💾</span>
+      <div><div>גיבוי JSON</div><div style="font-size:12px;color:var(--g600);font-weight:400">לשחזור מלא של כל הנתונים</div></div>
+    </div>
+  </div>
   <div class="sheet-actions" id="sheet-actions" style="display:none"></div>
 </div>
 
@@ -862,6 +1364,9 @@ textarea{resize:vertical;min-height:80px}
 <!-- EXPENSES PRINT -->
 <section id="exp-print" style="display:none"></section>
 
+<script>
+window.__BERLIN_PRELOAD__ = {"schedule":{"sun":{"label":"ראשון 26/4","dress":{"type":"casual","text":"לבוש נוח","detail":"👕 חולצה ומכנסיים ספורטיביים"},"hotel":null,"events":[{"id":"s1","time":"03:30","title":"כינוס נתב\"ג","detail":"טרמינל 3, מול דלפק מודיעין","loc":"Ben Gurion Airport Terminal 3 Israel","files":[]},{"id":"s2","time":"06:20","title":"המראה לברלין","detail":"אל על LY2371","loc":"Ben Gurion Airport Terminal 3 Israel","files":[]},{"id":"s3","time":"09:35","title":"נחיתה בברלין","detail":"⚠️ לא להתקדם עצמאית — להמתין ביציאה מהשרוול","loc":"Berlin Brandenburg Airport BER Terminal 1","files":[]},{"id":"s4","time":"10:30","title":"יציאה מהטרמינל","detail":"אוטובוס ממתין","loc":"Berlin Brandenburg Airport BER","files":[]},{"id":"s5","time":"17:00","title":"הגעה למלון RIU Plaza Berlin","detail":"כניסה לחדרים","loc":"RIU Plaza Berlin Hotel Germany","files":[]}]},"mon":{"label":"שני 27/4","dress":{"type":"formal","text":"חליפה ללא עניבה","detail":"👔 לבוש רשמי"},"hotel":{"name":"RIU Plaza Berlin","dates":"26.4–30.4","loc":"RIU Plaza Berlin Hotel Germany"},"events":[{"id":"m1","time":"09:00","title":"יציאה מהמלון","detail":"רכבת קלה, כרטיס חופשי יחולק","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"m2","time":"10:00","title":"פגישה עם מפכ\"לית ברלין + האקדמיה המשטרתית","detail":"","loc":"Berlin Police Headquarters Tempelhof","files":[]},{"id":"m3","time":"12:00","title":"זמן חופשי במרכז העיר","detail":"עד 14:00","loc":"Berlin Mitte city center","files":[]},{"id":"m4","time":"14:00","title":"פגישה — Command 11","detail":"מרכז פיקוד משטרתי","loc":"Berlin Police Command Center 11","files":[]},{"id":"m5","time":"17:00","title":"חזרה למלון — ערב חופשי","detail":"","loc":"RIU Plaza Berlin Hotel Germany","files":[]}]},"tue":{"label":"שלישי 28/4","dress":{"type":"formal","text":"חליפה ללא עניבה","detail":"👔 לבוש רשמי"},"hotel":{"name":"RIU Plaza Berlin","dates":"26.4–30.4","loc":"RIU Plaza Berlin Hotel Germany"},"events":[{"id":"t1","time":"09:00","title":"יציאה בתחב\"צ לפרלמנט","detail":"","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"t2","time":"10:00","title":"פגישה עם חבר פרלמנט","detail":"","loc":"Bundestag Reichstag Building Berlin","files":[]},{"id":"t3","time":"12:00","title":"סיום בפרלמנט — נסיעה לאוניברסיטה","detail":"","loc":"Bundestag Reichstag Building Berlin","files":[]},{"id":"t4","time":"14:00","title":"פעילות באוניברסיטה","detail":"","loc":"HWR Berlin Hochschule für Wirtschaft und Recht","files":[]},{"id":"t5","time":"17:00","title":"חזרה למלון — זמן חופשי","detail":"עד 19:00","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"t6","time":"19:00","title":"ערב מפקד — מלון קינג דייויד","detail":"יציאה במוניות, סיום משוער 23:00","loc":"Hotel Palace Berlin","files":[]}]},"wed":{"label":"רביעי 29/4","dress":{"type":"formal","text":"חליפה ללא עניבה","detail":"👔 לבוש רשמי"},"hotel":{"name":"RIU Plaza Berlin","dates":"26.4–30.4","loc":"RIU Plaza Berlin Hotel Germany"},"events":[{"id":"w1","time":"09:00","title":"יציאה בתחב\"צ — פעילות בפרלמנט","detail":"סיור + פגישות","loc":"Bundestag Reichstag Building Berlin","files":[]},{"id":"w2","time":"13:00","title":"נסיעה ל-Rola Solutions","detail":"","loc":"Rola Solutions GmbH Berlin","files":[]},{"id":"w3","time":"14:00","title":"פגישה עם נציגי Rola Solutions","detail":"","loc":"Rola Solutions GmbH Berlin","files":[]},{"id":"w4","time":"16:00","title":"סיום — זמן חופשי","detail":"","loc":"","files":[]}]},"thu":{"label":"חמישי 30/4","dress":{"type":"casual","text":"לבוש נוח","detail":"👕 אך התחשבו באופי המקום"},"hotel":null,"events":[{"id":"h1","time":"08:00","title":"פינוי חדרים","detail":"טסים: מזוודות לאוטובוס. נשארים: שמירת חפצים במלון","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"h2","time":"09:00","title":"יציאה לוילה ואנזה","detail":"אוטובוס צמוד כל היום","loc":"RIU Plaza Berlin Hotel Germany","files":[]},{"id":"h3","time":"10:00","title":"פעילות בוילה ואנזה","detail":"סדנת \"בירוקרטים\" — תפקיד הפקידים ביישום הפתרון הסופי","loc":"Wannsee Conference House Villa Berlin","files":[]},{"id":"h4","time":"15:00","title":"סיום","detail":"טסים: קניון סמוך לשדה. נשארים: חופשי","loc":"","files":[]},{"id":"h5","time":"20:55","title":"טיסה לסופיה","detail":"Ryanair","loc":"Berlin Brandenburg Airport BER","files":[]},{"id":"h6","time":"00:10","title":"נחיתה בסופיה (שישי)","detail":"שאטל למלון","loc":"Sofia Airport Bulgaria","files":[]},{"id":"h7","time":"11:05","title":"המראה מסופיה (שישי)","detail":"אל על LY552","loc":"Sofia Airport Bulgaria","files":[]}]}},"messages":[{"title":"בדיקה","body":"בוקר טוב","type":"success","time":"17:57:50","date":"23.4.2026"},{"title":"בוקר טוב","body":"בדיקה","type":"info","time":"17:25:43","date":"23.4.2026"}],"offline":true,"exportedAt":"2026-04-25T15:00:53.411Z"};
+</script>
 <script>
 // ==================== DATA ====================
 const DRIVE_URL = 'https://drive.google.com/drive/folders/1B25Z583TOClY91nGGRSxkV2bCzbDNn0M';
@@ -960,6 +1465,348 @@ let broadcastQueue = [];
 let currentSheetType = '';
 let cloudAvailable = false;
 let fbUnsubscribers = [];
+
+// ==================== REGISTRATION ====================
+// Registration is required before using the app.
+// Data is saved to Firebase under /registrations/{uid}
+// Admin can view all registrations and export.
+
+// ==================== REGISTRATION ====================
+// Detect URL params: ?register or ?r forces the registration form on this device.
+// Also force-shows the form if the user hasn't registered yet (no "registrations/<uid>" record).
+function isRegisterUrl(){
+  const params = new URLSearchParams(window.location.search);
+  return params.has('register') || params.has('r');
+}
+
+function isLocallyRegistered(){
+  return !!localStorage.getItem('berlin_registered');
+}
+
+async function isCloudRegistered(){
+  if(!window.fbDB) return false;
+  try{
+    const uid = getUserId();
+    const data = await window.fbDB.get('registrations/' + uid);
+    return !!(data && data.fullName);
+  }catch(e){
+    return false;
+  }
+}
+
+async function checkAndShowRegistration(){
+  // Wait for Firebase to be ready
+  await waitForFirebase(5000);
+
+  const isRegUrl = isRegisterUrl();
+  const local = isLocallyRegistered();
+  // If the user already registered (locally), let them in unless ?register forces it
+  if(local && !isRegUrl){
+    return false; // don't show form
+  }
+  // For ?register URL — always show form (collecting new participant)
+  // For first-time visitors without ?register — also show form (mandatory registration)
+  showRegistrationForm();
+  return true;
+}
+
+function showRegistrationForm(){
+  const overlay = document.getElementById('reg-overlay');
+  if(overlay) overlay.classList.add('on');
+  document.getElementById('reg-form-view').style.display = 'block';
+  document.getElementById('reg-success-view').style.display = 'none';
+  // Pre-fill from localStorage if existing partial data
+  const cached = lsGet('berlin_reg_draft', null);
+  if(cached){
+    if(cached.fullName) document.getElementById('reg-name').value = cached.fullName;
+    if(cached.phone) document.getElementById('reg-phone').value = cached.phone;
+    if(cached.emerName) document.getElementById('reg-emer-name').value = cached.emerName;
+    if(cached.emerPhone) document.getElementById('reg-emer-phone').value = cached.emerPhone;
+    if(cached.returnDate) document.getElementById('reg-return').value = cached.returnDate;
+  }
+  // Save draft on every change
+  ['reg-name','reg-phone','reg-emer-name','reg-emer-phone','reg-return'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el){
+      el.addEventListener('input', saveRegDraft);
+    }
+  });
+}
+
+function saveRegDraft(){
+  const draft = {
+    fullName: document.getElementById('reg-name').value,
+    phone: document.getElementById('reg-phone').value,
+    emerName: document.getElementById('reg-emer-name').value,
+    emerPhone: document.getElementById('reg-emer-phone').value,
+    returnDate: document.getElementById('reg-return').value
+  };
+  lsSet('berlin_reg_draft', draft);
+}
+
+function hideRegistrationOverlay(){
+  const overlay = document.getElementById('reg-overlay');
+  if(overlay) overlay.classList.remove('on');
+}
+
+function showRegError(msg){
+  const e = document.getElementById('reg-error');
+  e.textContent = msg;
+  e.style.display = 'block';
+}
+
+function hideRegError(){
+  document.getElementById('reg-error').style.display = 'none';
+}
+
+async function submitRegistration(){
+  hideRegError();
+  const fullName = document.getElementById('reg-name').value.trim();
+  const phone = document.getElementById('reg-phone').value.trim();
+  const emerName = document.getElementById('reg-emer-name').value.trim();
+  const emerPhone = document.getElementById('reg-emer-phone').value.trim();
+  const returnDate = document.getElementById('reg-return').value;
+
+  // Validation
+  if(!fullName || fullName.length < 2){ showRegError('✋ אנא הזן שם מלא תקין'); return; }
+  if(!phone || phone.replace(/[^0-9]/g,'').length < 7){ showRegError('✋ אנא הזן מספר טלפון תקין'); return; }
+  if(!emerName || emerName.length < 2){ showRegError('✋ אנא הזן שם איש קשר תקין'); return; }
+  if(!emerPhone || emerPhone.replace(/[^0-9]/g,'').length < 7){ showRegError('✋ אנא הזן טלפון איש קשר תקין'); return; }
+  if(!returnDate){ showRegError('✋ אנא בחר תאריך חזרה'); return; }
+
+  if(!window.fbDB){
+    showRegError('⚠️ אין חיבור לרשת. בדוק שהאינטרנט פעיל ונסה שוב.');
+    return;
+  }
+
+  const uid = getUserId();
+  const reg = {
+    uid,
+    fullName,
+    phone,
+    emerName,
+    emerPhone,
+    returnDate,
+    registeredAt: new Date().toISOString(),
+    ua: (navigator.userAgent || '').slice(0, 120)
+  };
+
+  try{
+    await window.fbDB.set('registrations/' + uid, reg);
+    // Save locally so they don't see the form again
+    localStorage.setItem('berlin_registered', '1');
+    lsSet('berlin_reg_data', reg);
+    // Also save to standard SOS settings so it pre-fills there
+    lsSet('sos_name', fullName);
+    // Clear draft
+    localStorage.removeItem('berlin_reg_draft');
+
+    // Update profile in users/ collection too
+    syncUserProfile();
+
+    // Show success view
+    document.getElementById('reg-success-name').textContent = fullName.split(' ')[0];
+    document.getElementById('reg-form-view').style.display = 'none';
+    document.getElementById('reg-success-view').style.display = 'block';
+    window.scrollTo(0,0);
+  }catch(err){
+    console.warn('registration failed', err);
+    showRegError('❌ שגיאה בשמירה. נסה שוב.');
+  }
+}
+
+function enterApp(){
+  hideRegistrationOverlay();
+  // Clean ?register from URL if present so refresh doesn't re-show form
+  if(isRegisterUrl() && history.replaceState){
+    const url = new URL(window.location.href);
+    url.searchParams.delete('register');
+    url.searchParams.delete('r');
+    history.replaceState({}, '', url.toString());
+  }
+  goPage('home');
+}
+
+// Admin view: fetch all registrations
+async function fetchAllRegistrations(){
+  if(!window.fbDB) return [];
+  try{
+    const data = await window.fbDB.get('registrations');
+    if(!data) return [];
+    const regs = Object.values(data).filter(r => r && r.fullName);
+    regs.sort((a,b)=>(b.registeredAt||'').localeCompare(a.registeredAt||''));
+    return regs;
+  }catch(e){
+    console.warn('fetch registrations failed:', e);
+    return [];
+  }
+}
+
+async function refreshRegistrations(){
+  const regs = await fetchAllRegistrations();
+  const box = document.getElementById('reg-list');
+  const stat = document.getElementById('reg-stat-count');
+  if(stat) stat.textContent = regs.length;
+
+  if(!box) return;
+  if(!regs.length){
+    box.innerHTML = `<div style="text-align:center;padding:30px;color:var(--g600);font-size:13px;background:#fff;border-radius:var(--r);border:1px dashed var(--g200)">
+      עדיין לא נרשמו משתתפים<br>
+      <span style="font-size:11px">שתף את הקישור כדי להתחיל</span>
+    </div>`;
+    return;
+  }
+
+  box.innerHTML = regs.map(r=>{
+    const name = r.fullName || '(ללא שם)';
+    const initial = (r.fullName || '?').charAt(0).toUpperCase();
+    const regDate = r.registeredAt ? new Date(r.registeredAt).toLocaleDateString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
+    const retDate = r.returnDate ? new Date(r.returnDate).toLocaleDateString('he-IL',{day:'2-digit',month:'2-digit'}) : '?';
+    return `<div class="reg-row">
+      <div class="reg-row-h">
+        <div class="reg-avatar">${escHtml(initial)}</div>
+        <div class="reg-info">
+          <div class="reg-nm">${escHtml(name)}</div>
+          <div class="reg-sub">${escHtml(regDate)}</div>
+        </div>
+        <div class="reg-acts">
+          <a href="https://wa.me/${escHtml((r.phone||'').replace(/[^0-9]/g,''))}" target="_blank" rel="noopener" class="reg-act" title="שלח WhatsApp">💬</a>
+          <button onclick="deleteRegistration('${r.uid}','${escHtml(name)}')" class="reg-act danger" title="מחק">🗑️</button>
+        </div>
+      </div>
+      <div class="reg-details">
+        <div><span class="reg-lbl">טל'</span><a href="tel:${escHtml(r.phone)}">${escHtml(r.phone)}</a></div>
+        <div><span class="reg-lbl">חזרה</span>${escHtml(retDate)}</div>
+        <div class="reg-emer"><span class="reg-lbl">איש קשר חירום</span>${escHtml(r.emerName)} · <a href="tel:${escHtml(r.emerPhone)}">${escHtml(r.emerPhone)}</a></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function deleteRegistration(uid, name){
+  if(!confirm(`למחוק את הרישום של ${name}?\n(הפעולה לא ניתנת לביטול)`)) return;
+  try{
+    await window.fbDB.set('registrations/' + uid, null);
+    refreshRegistrations();
+    toast('🗑️ הרישום נמחק');
+  }catch(e){
+    toast('❌ שגיאה במחיקה','err');
+  }
+}
+
+function exportRegistrations(){
+  fetchAllRegistrations().then(regs=>{
+    if(!regs.length){ toast('אין רישומים לייצוא','err'); return; }
+    const rows = [['שם מלא','טלפון','איש קשר חירום','טלפון איש קשר','תאריך חזרה','תאריך הרשמה']];
+    regs.forEach(r=>{
+      rows.push([
+        r.fullName,
+        r.phone,
+        r.emerName,
+        r.emerPhone,
+        r.returnDate,
+        r.registeredAt ? new Date(r.registeredAt).toLocaleString('he-IL') : ''
+      ]);
+    });
+    const csv = '\ufeff' + rows.map(r=>r.map(c=>`"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'berlin2026_registrations_'+new Date().toISOString().slice(0,10)+'.csv';
+    a.click();
+    toast('✅ הקובץ הורד');
+  });
+}
+
+function printRegistrations(){
+  fetchAllRegistrations().then(regs=>{
+    if(!regs.length){ toast('אין רישומים להדפסה','err'); return; }
+    const today = new Date().toLocaleDateString('he-IL');
+    const sorted = [...regs].sort((a,b)=>(a.fullName||'').localeCompare(b.fullName||'','he'));
+
+    let html = `<div style="font-family:'Heebo',sans-serif;direction:rtl;padding:20px;max-width:900px;margin:0 auto;color:#1a1a1a">
+      <div style="text-align:center;border-bottom:2px solid #1a5fa5;padding-bottom:14px;margin-bottom:18px">
+        <div style="font-size:32px">🇩🇪✈️</div>
+        <h1 style="font-size:22px;margin:8px 0;color:#0c447c">דו"ח משתתפי משלחת — ברלין 2026</h1>
+        <div style="font-size:13px;color:#666">${escHtml(today)} · ${regs.length} משתתפים</div>
+      </div>
+
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:#1a5fa5;color:#fff">
+            <th style="padding:8px;text-align:right;border:1px solid #ddd">#</th>
+            <th style="padding:8px;text-align:right;border:1px solid #ddd">שם מלא</th>
+            <th style="padding:8px;text-align:right;border:1px solid #ddd">טלפון אישי</th>
+            <th style="padding:8px;text-align:right;border:1px solid #ddd">איש קשר חירום</th>
+            <th style="padding:8px;text-align:right;border:1px solid #ddd">טלפון איש קשר</th>
+            <th style="padding:8px;text-align:right;border:1px solid #ddd">חזרה</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${sorted.map((r,i)=>{
+            const ret = r.returnDate ? new Date(r.returnDate).toLocaleDateString('he-IL',{day:'2-digit',month:'2-digit'}) : '';
+            return `<tr>
+              <td style="padding:6px 8px;border:1px solid #ddd">${i+1}</td>
+              <td style="padding:6px 8px;border:1px solid #ddd;font-weight:600">${escHtml(r.fullName)}</td>
+              <td style="padding:6px 8px;border:1px solid #ddd">${escHtml(r.phone)}</td>
+              <td style="padding:6px 8px;border:1px solid #ddd">${escHtml(r.emerName)}</td>
+              <td style="padding:6px 8px;border:1px solid #ddd">${escHtml(r.emerPhone)}</td>
+              <td style="padding:6px 8px;border:1px solid #ddd">${escHtml(ret)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+    const printDiv = document.getElementById('exp-print');
+    printDiv.innerHTML = html;
+    printDiv.style.display = 'block';
+    document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+    setTimeout(()=>{
+      window.print();
+      setTimeout(()=>{
+        printDiv.style.display = 'none';
+        document.getElementById('page-admin').classList.add('on');
+      }, 500);
+    }, 200);
+  });
+}
+
+function copyRegistrationLink(){
+  const url = window.location.origin + window.location.pathname + '?register';
+  const shareMsg = `שלום! 👋\n\nברוך הבא למשלחת מב"ל רגבים לברלין 2026 🇩🇪\n\nלפני התחלת המשלחת, נא למלא את פרטי הרישום בקישור הבא:\n\n${url}\n\nהפרטים נשמרים במערכת מאובטחת ומשמשים לצוות המשלחת בלבד למקרי חירום.`;
+
+  // Show options sheet
+  currentSheetType = 'shareReg';
+  document.getElementById('sheet-title').textContent = '🔗 שתף קישור הרשמה';
+  document.getElementById('sheet-body').innerHTML = `
+    <div style="background:var(--g50);border-radius:8px;padding:12px;margin-bottom:12px;font-size:13px;line-height:1.5;color:var(--g700);word-break:break-all">
+      ${escHtml(url)}
+    </div>
+
+    <button class="btn btn-success btn-full" style="margin-bottom:8px;padding:14px;font-size:14px" onclick="doCopyRegLink()">
+      📋 העתק קישור בלבד
+    </button>
+
+    <a href="https://wa.me/?text=${encodeURIComponent(shareMsg)}" target="_blank" rel="noopener" class="btn btn-primary btn-full" style="padding:14px;font-size:14px;text-decoration:none">
+      💬 שתף ב-WhatsApp עם הודעה מוכנה
+    </a>
+
+    <div style="background:var(--blue-l);border:1px solid var(--blue);border-radius:8px;padding:10px 12px;margin-top:12px;font-size:11px;color:var(--blue-d);line-height:1.5">
+      <strong>💡 טיפ:</strong> לחיצה על "שתף ב-WhatsApp" תפתח את WhatsApp עם הודעה מוכנה הכוללת את הקישור והסבר. בחר את חברי המשלחת ושלח.
+    </div>
+  `;
+  document.getElementById('sheet-actions').style.display = 'none';
+  openSheet();
+}
+
+function doCopyRegLink(){
+  const url = window.location.origin + window.location.pathname + '?register';
+  navigator.clipboard.writeText(url).then(
+    ()=>{ toast('✅ הקישור הועתק'); closeSheet(); },
+    ()=>toast('❌ שגיאה בהעתקה','err')
+  );
+}
 
 // ==================== EXPENSES ====================
 const EXPENSE_CATEGORIES = [
@@ -1467,6 +2314,176 @@ function exportAnalytics(){
     a.click();
     toast('✅ קובץ CSV הורד');
   });
+}
+
+// ==================== REGISTRATIONS (ADMIN) ====================
+let allRegistrations = [];
+
+async function fetchAllRegistrations(){
+  if(!window.fbDB) return [];
+  try{
+    const data = await window.fbDB.get('registrations');
+    if(!data) return [];
+    const regs = Object.values(data).filter(r => r && r.uid);
+    regs.sort((a,b)=>(b.registeredAt||'').localeCompare(a.registeredAt||''));
+    return regs;
+  }catch(e){
+    console.warn('fetch regs failed:', e);
+    return [];
+  }
+}
+
+async function renderRegistrations(){
+  const list = document.getElementById('regs-list');
+  if(!list) return;
+
+  list.innerHTML = `<div style="text-align:center;padding:20px;color:var(--g600);font-size:13px">טוען...</div>`;
+
+  allRegistrations = await fetchAllRegistrations();
+
+  // Update stats
+  const today = new Date().toISOString().slice(0,10);
+  const todayCount = allRegistrations.filter(r=>(r.registeredAt||'').startsWith(today)).length;
+  document.getElementById('reg-stat-total').textContent = allRegistrations.length;
+  document.getElementById('reg-stat-today').textContent = todayCount;
+
+  filterRegistrations();
+}
+
+function filterRegistrations(){
+  const list = document.getElementById('regs-list');
+  if(!list) return;
+
+  const q = (document.getElementById('reg-search')?.value || '').trim().toLowerCase();
+  const regs = q
+    ? allRegistrations.filter(r=>{
+        const hay = `${r.name||''} ${r.phone||''} ${r.emerName||''} ${r.emerPhone||''}`.toLowerCase();
+        return hay.includes(q);
+      })
+    : allRegistrations;
+
+  if(!regs.length){
+    list.innerHTML = `<div style="text-align:center;padding:30px;color:var(--g600);font-size:13px;background:#fff;border-radius:10px;border:1px dashed var(--g200)">
+      ${q ? '🔍 לא נמצאו רשומים מתאימים' : '👋 עדיין לא נרשמו משתתפים'}
+    </div>`;
+    return;
+  }
+
+  list.innerHTML = regs.map(r=>{
+    const ts = r.registeredAt ? new Date(r.registeredAt) : null;
+    const tsStr = ts ? ts.toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+    const returnStr = r.returnDate ? new Date(r.returnDate).toLocaleDateString('he-IL') : '—';
+    const phoneClean = (r.phone||'').replace(/[^0-9]/g,'');
+    const emerClean = (r.emerPhone||'').replace(/[^0-9]/g,'');
+    // Build wa.me link - assume Israeli numbers if starts with 0
+    const waPhone = phoneClean.startsWith('0') ? '972'+phoneClean.slice(1) : phoneClean;
+    const waEmer = emerClean.startsWith('0') ? '972'+emerClean.slice(1) : emerClean;
+    return `<div class="reg-row">
+      <div class="top">
+        <div class="nm">👤 ${escHtml(r.name||'(ללא שם)')}</div>
+        <div class="ts">${escHtml(tsStr)}</div>
+      </div>
+      <div class="grid">
+        <div class="cell">
+          <div class="lb">📱 טלפון אישי</div>
+          <div class="vl">${escHtml(r.phone||'—')}</div>
+        </div>
+        <div class="cell">
+          <div class="lb">📅 תאריך חזרה</div>
+          <div class="vl">${escHtml(returnStr)}</div>
+        </div>
+        <div class="cell">
+          <div class="lb">🆘 איש קשר חירום</div>
+          <div class="vl">${escHtml(r.emerName||'—')}</div>
+        </div>
+        <div class="cell">
+          <div class="lb">☎️ טלפון איש הקשר</div>
+          <div class="vl">${escHtml(r.emerPhone||'—')}</div>
+        </div>
+      </div>
+      <div class="acts">
+        ${phoneClean ? `<a href="https://wa.me/${waPhone}" target="_blank" rel="noopener" class="wa">💬 WhatsApp לחבר</a>` : ''}
+        ${emerClean ? `<a href="https://wa.me/${waEmer}" target="_blank" rel="noopener" class="wa">💬 לאיש הקשר</a>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function exportRegistrations(){
+  if(!allRegistrations.length){ toast('אין רשומים לייצוא','err'); return; }
+  const rows = [['שם','טלפון אישי','איש קשר חירום','טלפון איש הקשר','תאריך חזרה','תאריך הרשמה']];
+  allRegistrations.forEach(r=>{
+    rows.push([
+      r.name||'',
+      r.phone||'',
+      r.emerName||'',
+      r.emerPhone||'',
+      r.returnDate ? new Date(r.returnDate).toLocaleDateString('he-IL') : '',
+      r.registeredAt ? new Date(r.registeredAt).toLocaleString('he-IL') : ''
+    ]);
+  });
+  const csv = '\ufeff' + rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'berlin2026_registrations_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
+  toast('✅ קובץ CSV הורד');
+}
+
+function printRegistrations(){
+  if(!allRegistrations.length){ toast('אין רשומים להדפסה','err'); return; }
+  const today = new Date().toLocaleDateString('he-IL');
+
+  let html = `<div style="font-family:'Heebo',sans-serif;direction:rtl;padding:20px;max-width:900px;margin:0 auto;color:#1a1a1a">
+    <div style="text-align:center;border-bottom:2px solid #1a5fa5;padding-bottom:14px;margin-bottom:18px">
+      <div style="font-size:28px">🇮🇱 🇩🇪</div>
+      <h1 style="font-size:22px;margin:8px 0;color:#0c447c">רשימת משתתפי משלחת ברלין 2026</h1>
+      <div style="font-size:13px;color:#666">${escHtml(allRegistrations.length)} משתתפים · הופק ב-${escHtml(today)}</div>
+    </div>
+
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="background:#f0f4f8">
+          <th style="text-align:right;padding:10px;border-bottom:2px solid #ccc">#</th>
+          <th style="text-align:right;padding:10px;border-bottom:2px solid #ccc">שם מלא</th>
+          <th style="text-align:right;padding:10px;border-bottom:2px solid #ccc">טלפון אישי</th>
+          <th style="text-align:right;padding:10px;border-bottom:2px solid #ccc">איש קשר חירום</th>
+          <th style="text-align:right;padding:10px;border-bottom:2px solid #ccc">טלפון חירום</th>
+          <th style="text-align:right;padding:10px;border-bottom:2px solid #ccc">חזרה</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${allRegistrations.map((r,i)=>{
+          const returnStr = r.returnDate ? new Date(r.returnDate).toLocaleDateString('he-IL') : '—';
+          return `<tr>
+            <td style="padding:8px;border-bottom:1px solid #eee">${i+1}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;font-weight:600">${escHtml(r.name||'')}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;direction:ltr;text-align:right">${escHtml(r.phone||'—')}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">${escHtml(r.emerName||'—')}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;direction:ltr;text-align:right">${escHtml(r.emerPhone||'—')}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">${escHtml(returnStr)}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+
+    <div style="margin-top:24px;font-size:10px;color:#666;text-align:center">
+      🔒 מסמך זה כולל מידע אישי ורגיש. לשימוש פנימי בלבד.
+    </div>
+  </div>`;
+
+  const printDiv = document.getElementById('exp-print');
+  printDiv.innerHTML = html;
+  printDiv.style.display = 'block';
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+  setTimeout(()=>{
+    window.print();
+    setTimeout(()=>{
+      printDiv.style.display = 'none';
+      document.getElementById('page-admin').classList.add('on');
+    }, 500);
+  }, 200);
 }
 
 // ==================== UTILITIES ====================
@@ -2304,34 +3321,39 @@ function buildSOSMessage(){
   }
   return `🚨 *התראת מצוקה – משלחת ברלין 2026*\n\n👤 שם: ${name}\n${locPart}${mapPart}\n\n🕐 שעה: ${now}\n\nנדרש סיוע מיידי!\n☎️ משטרת ברלין: *110*`;
 }
-function sendWhatsAppNow(){
-  const num = lsGet('sos_num','').replace(/[^0-9]/g,'');
-  const grp = lsGet('sos_grp','');
-  const msg = encodeURIComponent(buildSOSMessage());
-  if(grp){
-    safeOpen(grp);
-    setTimeout(()=>{
-      if(num){ safeOpen(`https://wa.me/${num}?text=${msg}`); }
-    },500);
-    return;
-  }
-  if(!num){ toast('✋ הגדר מספר WhatsApp בהגדרות','err'); return; }
-  safeOpen(`https://wa.me/${num}?text=${msg}`);
-}
-
 // Direct click handler for the main SOS WhatsApp button.
 // Mobile browsers block window.open() when it's called async (after delay).
 // This handler sets the href right before the browser follows the link —
 // all inside the SAME user click event, which browsers always honor.
+//
+// Priority: if a group link is configured, send there (more eyes = faster help).
+// Fallback: if no group, send to the personal contact number.
 function prepareSOSWhatsApp(ev){
+  const grp = lsGet('sos_grp','').trim();
   const num = lsGet('sos_num','').replace(/[^0-9]/g,'');
-  if(!num){
+  const msg = encodeURIComponent(buildSOSMessage());
+
+  let url = '';
+  if(grp){
+    // Send to group — append message via wa.me text param if it's a wa.me link,
+    // otherwise just open the group (user can paste). Most WhatsApp invite links
+    // don't accept ?text=, so we copy the message to clipboard as a backup.
+    url = grp;
+    // Copy message to clipboard so user can paste in the group
+    try{
+      const plainMsg = buildSOSMessage();
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(plainMsg).catch(()=>{});
+      }
+    }catch(e){}
+  } else if(num){
+    url = `https://wa.me/${num}?text=${msg}`;
+  } else {
     ev.preventDefault();
-    toast('✋ הגדר מספר WhatsApp בהגדרות','err');
+    toast('✋ הגדר קבוצת WhatsApp או מספר איש קשר בהגדרות','err');
     return false;
   }
-  const msg = encodeURIComponent(buildSOSMessage());
-  const url = `https://wa.me/${num}?text=${msg}`;
+
   // Update the anchor's href so the native click behavior opens the correct URL
   const el = document.getElementById('sos-wa-btn');
   if(el){
@@ -2561,19 +3583,20 @@ function showSOSActionsPanel(){
   document.getElementById('sheet-body').innerHTML = `
     <div style="background:var(--red-l);border:1px solid var(--red);border-radius:10px;padding:12px;margin-bottom:14px;font-size:13px;line-height:1.5;color:var(--red)">
       <strong>התראת החירום הופעלה.</strong><br>
-      שלח הודעה לאחת מהכתובות:
+      ${grpUrl?'ההודעה הועתקה ללוח. שלח אותה לקבוצה או לאיש קשר:':'שלח את ההודעה דרך אחת מהכתובות:'}
       ${locBadge}
     </div>
 
-    ${waUrl ? `<a href="${waUrl}" target="_blank" rel="noopener" class="btn btn-success btn-full" style="margin-bottom:8px;padding:16px;font-size:16px;text-decoration:none">
-      💬 שלח WhatsApp לאיש קשר
-    </a>` : `<div style="background:var(--amber-l);padding:10px;border-radius:8px;margin-bottom:8px;font-size:13px;color:#7a5600">
-      ⚠️ לא הוגדר מספר WhatsApp. עבור להגדרות SOS להוסיף.
-    </div>`}
-
-    ${grpUrl ? `<a href="${grpUrl}" target="_blank" rel="noopener" class="btn btn-primary btn-full" style="margin-bottom:8px;text-decoration:none">
-      👥 פתח קבוצת WhatsApp
+    ${grpUrl ? `<a href="${grpUrl}" target="_blank" rel="noopener" class="btn btn-success btn-full" onclick="copySOSToClipboard()" style="margin-bottom:8px;padding:16px;font-size:16px;text-decoration:none">
+      👥 שלח לקבוצת WhatsApp
+      <div style="font-size:11px;opacity:0.9;font-weight:500;margin-top:2px">ההודעה תועתק — הדבק בקבוצה</div>
     </a>` : ''}
+
+    ${waUrl ? `<a href="${waUrl}" target="_blank" rel="noopener" class="btn ${grpUrl?'btn-ghost':'btn-success'} btn-full" style="margin-bottom:8px;padding:${grpUrl?'12px':'16px'};font-size:${grpUrl?'14px':'16px'};text-decoration:none">
+      💬 ${grpUrl?'או שלח לאיש קשר אישי':'שלח WhatsApp לאיש קשר'}
+    </a>` : (!grpUrl ? `<div style="background:var(--amber-l);padding:10px;border-radius:8px;margin-bottom:8px;font-size:13px;color:#7a5600">
+      ⚠️ לא הוגדר מספר WhatsApp. עבור להגדרות SOS להוסיף.
+    </div>` : '')}
 
     ${hasLocation ? `<a href="${googleMapsUrl}" target="_blank" rel="noopener" class="btn btn-ghost btn-full" style="margin-bottom:8px;text-decoration:none">
       🗺️ הצג מיקום במפה
@@ -2615,6 +3638,15 @@ function copySOSMessage(){
     ()=>toast('❌ שגיאה בהעתקה','err')
   );
 }
+// Silent copy — used when navigating to a group; no toast (we're navigating away)
+function copySOSToClipboard(){
+  try{
+    const msg = buildSOSMessage();
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(msg).catch(()=>{});
+    }
+  }catch(e){}
+}
 function cancelCountdown(){
   if(countdownInt){ clearInterval(countdownInt); countdownInt=null; }
   document.getElementById('cd-overlay').classList.remove('on');
@@ -2655,6 +3687,7 @@ function switchAdm(k){
   document.querySelectorAll('.adm-panel').forEach(p=>p.classList.remove('on'));
   document.getElementById('adm-'+k).classList.add('on');
   if(k==='analytics') refreshAnalytics();
+  if(k==='regs') renderRegistrations();
 }
 function renderAdmDaySel(){
   const sel = document.getElementById('adm-day-sel');
@@ -3137,6 +4170,13 @@ function waitForFirebase(timeoutMs=5000){
 async function init(){
   loadLocal();
   loadExpenses();
+
+  // Check if user has registered. If not, show registration overlay first.
+  // The overlay covers the whole app and forces them to register before continuing.
+  if(!isRegistered() && !isOfflineCopy){
+    showRegistration();
+  }
+
   // If running as offline copy, skip cloud loading
   if(isOfflineCopy){
     renderSchedule();
@@ -3166,6 +4206,8 @@ async function init(){
   // Wait for Firebase to be ready, then load from cloud and subscribe to realtime updates
   const fbReady = await waitForFirebase(5000);
   if(fbReady){
+    // Check registration first — may show full-screen form
+    checkAndShowRegistration();
     await loadFromCloud();
     renderSchedule();
     renderHome();
@@ -3249,5 +4291,6 @@ async function init(){
 }
 init();
 </script>
-</body>
-</html>
+
+
+</body></html>
